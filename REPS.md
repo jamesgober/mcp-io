@@ -10,7 +10,7 @@
 
 The key words "**MUST**", "**MUST NOT**", "**REQUIRED**", "**SHALL**", "**SHALL NOT**", "**SHOULD**", "**SHOULD NOT**", "**RECOMMENDED**",  "**MAY**", and "**OPTIONAL**" in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119).
 
-&rarr; view [**definitions**](definitions.md) for details.
+&rarr; the key-word definitions are kept with the REPS standards (`KEYWORDS.md`), outside this repository.
 
 <hr>
 

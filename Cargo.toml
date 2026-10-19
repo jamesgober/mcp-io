@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "mcp-io"
-version = "0.1.0"
+version = "0.2.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -16,7 +16,7 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Model Context Protocol server framework: tools, resources, prompts, permission tiers, and stdio/HTTP transports."
+description = "Model Context Protocol server framework: stateless MCP 2026-07-28 with a 2025-11-25 fallback, a tool registry with validated JSON Schema input, permission tiers, and a stdio transport over rpc-io."
 
 # Keywords (5 max)
 keywords = ["mcp", "ai", "llm", "protocol", "server"]
@@ -32,6 +32,21 @@ documentation = "https://docs.rs/mcp-io"
 # Authors
 authors = ["James Gober <me@jamesgober.com>"]
 
+# Package contents: the crate, its docs, examples, and benchmarks. Not the
+# engineering notes, the standards file, CI, the tests (with their vendored
+# test data), or the fuzz workspace.
+include = [
+    "src/**",
+    "examples/**",
+    "benches/**",
+    "docs/API.md",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -43,21 +58,25 @@ path = "src/lib.rs"
 
 # FEATURE FLAGS
 # #################################
-[features]
-default = ["std"]
-std = []
+# None. A server needs threads, clocks and stdio, so the crate is `std` only
+# (the 0.1.0 scaffold's empty `std` feature was removed: it could only ever
+# have become mandatory).
 
 
 # DEPENDENCIES
 # #################################
 [dependencies]
-# First-party -lang dependencies are wired at v0.2.0, when first used.
+# The owner's JSON-RPC engine: newline framing, the endpoint, correlation,
+# cancellation (MCP's spelling), progress, budgets on hostile input, and the
+# bounded output queue. Its `jsonx` re-export is the JSON this crate reads and
+# writes, so the graph holds exactly one jsonx-lib.
+rpc-io = { version = "0.4", default-features = false, features = ["std"] }
 
 
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.7", features = ["html_reports"] }
 proptest  = "1"
 
 
@@ -68,11 +87,18 @@ name    = "bench"
 harness = false
 
 
+# EXAMPLES
+# #################################
+[[example]]
+name = "stdio_server"
+
+
 # RELEASE PROFILE
 # #################################
 [profile.release]
 opt-level     = 3
 lto           = "fat"
 codegen-units = 1
-panic         = "abort"
+# No `panic = "abort"`: a panicking tool handler is contained and answered
+# with an error, which needs unwinding in this crate's own examples and benches.
 strip         = "symbols"

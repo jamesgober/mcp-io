@@ -1,0 +1,9 @@
+These files are the draft 2020-12 tests of the JSON Schema Test Suite,
+https://github.com/json-schema-org/JSON-Schema-Test-Suite, copied unmodified
+from commit 55719286c33ae0d1823bfb65fea10338a19bc37c (tests/draft2020-12/).
+
+They are licensed under the MIT License; see LICENSE in this directory
+(Copyright (c) 2012 Julian Berman). They are test data only: they are not
+part of the published crate (Cargo.toml `include` leaves tests/ out).
+
+tests/schema_suite.rs runs every case against mcp_io::Schema.

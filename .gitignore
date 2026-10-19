@@ -17,3 +17,9 @@ Desktop.ini
 
 # Libraries do not commit the lockfile
 Cargo.lock
+
+# Fuzzing output
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/Cargo.lock
