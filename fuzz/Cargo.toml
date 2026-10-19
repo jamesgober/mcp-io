@@ -1,0 +1,39 @@
+# Fuzz targets for the message-handling surface and the schema compiler
+# (cargo-fuzz layout).
+#
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run server -- -max_total_time=60
+#
+# Not published, and not part of the crate's package. The checks live in
+# `../tests/harness/mod.rs`, shared with `tests/fuzz_harness.rs`, which runs
+# them on random and mutated input in plain `cargo test`.
+[package]
+name    = "mcp-io-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mcp-io        = { path = ".." }
+
+# Its own workspace: kept out of the crate's builds.
+[workspace]
+members = ["."]
+
+[[bin]]
+name  = "server"
+path  = "fuzz_targets/server.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "schema"
+path  = "fuzz_targets/schema.rs"
+test  = false
+doc   = false
+bench = false
