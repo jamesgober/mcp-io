@@ -65,12 +65,16 @@ pub(crate) struct Registry {
     tools: RwLock<BTreeMap<Box<str>, Arc<Entry>>>,
     watchers: Mutex<Vec<Watcher>>,
     limits: RwLock<SchemaLimits>,
+    /// The key of the cursors' tags: random per registry, so a client cannot
+    /// make a cursor the server did not issue.
+    cursor_key: std::collections::hash_map::RandomState,
 }
 
 /// Registration numbers, unique within the process.
 static GENERATIONS: AtomicU64 = AtomicU64::new(0);
 
-/// The cursor prefix; what follows is the last name of the previous page.
+/// The cursor prefix; what follows is a tag and the last name of the
+/// previous page.
 const CURSOR_PREFIX: &str = "after:";
 
 impl Registry {
@@ -79,7 +83,29 @@ impl Registry {
             tools: RwLock::new(BTreeMap::new()),
             watchers: Mutex::new(Vec::new()),
             limits: RwLock::new(SchemaLimits::new()),
+            cursor_key: std::collections::hash_map::RandomState::new(),
         }
+    }
+
+    /// The cursor of the page after the tool named `last`: the name with a
+    /// keyed tag, `after:<tag>:<name>`.
+    fn cursor(&self, last: &str) -> String {
+        format!("{CURSOR_PREFIX}{:016x}:{last}", self.tag(last))
+    }
+
+    fn tag(&self, name: &str) -> u64 {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = self.cursor_key.build_hasher();
+        hasher.write(name.as_bytes());
+        hasher.finish()
+    }
+
+    /// The name a cursor this registry issued continues after; `None` for
+    /// anything else (malformed, forged, or from another server).
+    fn after<'c>(&self, cursor: &'c str) -> Option<&'c str> {
+        let (tag, name) = cursor.strip_prefix(CURSOR_PREFIX)?.split_once(':')?;
+        crate::tool::check_name(name).ok()?;
+        (tag.len() == 16 && u64::from_str_radix(tag, 16).ok()? == self.tag(name)).then_some(name)
     }
 
     pub(crate) fn set_limits(&self, limits: SchemaLimits) {
@@ -178,11 +204,7 @@ impl Registry {
     ) -> Option<(String, Option<String>)> {
         let after = match cursor {
             None => None,
-            Some(cursor) => {
-                let name = cursor.strip_prefix(CURSOR_PREFIX)?;
-                crate::tool::check_name(name).ok()?;
-                Some(name)
-            }
+            Some(cursor) => Some(self.after(cursor)?),
         };
         let tools = self.tools.read().unwrap_or_else(PoisonError::into_inner);
         let mut range: Box<dyn Iterator<Item = (&Box<str>, &Arc<Entry>)>> = match after {
@@ -206,7 +228,7 @@ impl Registry {
             last = Some(name);
         }
         let next = match (range.next(), last) {
-            (Some(_), Some(last)) => Some(format!("{CURSOR_PREFIX}{last}")),
+            (Some(_), Some(last)) => Some(self.cursor(last)),
             _ => None,
         };
         Some((out, next))
@@ -450,7 +472,10 @@ mod tests {
         let r = registry(&["c", "a", "e", "b", "d"]);
         let (page, next) = r.page(None, 2, false).unwrap_or_default();
         assert_eq!(names_of(&page), ["a", "b"]);
-        assert_eq!(next.as_deref(), Some("after:b"));
+        assert!(
+            next.as_deref()
+                .is_some_and(|c| c.starts_with("after:") && c.ends_with(":b"))
+        );
         let (page, next) = r.page(next.as_deref(), 2, false).unwrap_or_default();
         assert_eq!(names_of(&page), ["c", "d"]);
         let (page, next) = r.page(next.as_deref(), 2, false).unwrap_or_default();
@@ -470,13 +495,23 @@ mod tests {
     #[test]
     fn test_foreign_cursors_are_refused() {
         let r = registry(&["a"]);
-        for cursor in ["", "a", "after:", "after:bad name", "before:a"] {
+        for cursor in [
+            "",
+            "a",
+            "after:",
+            "after:bad name",
+            "before:a",
+            "after:zzz",
+            "after:0000000000000000:a",
+        ] {
             assert!(r.page(Some(cursor), 10, false).is_none(), "{cursor}");
         }
-        assert!(
-            r.page(Some("after:zzz"), 10, false)
-                .is_some_and(|(page, next)| page.is_empty() && next.is_none())
-        );
+        // A cursor issued by another registry (another server) is foreign too.
+        let other = registry(&["a", "b"]);
+        let (_, issued) = other.page(None, 1, false).unwrap_or_default();
+        let issued = issued.unwrap_or_default();
+        assert!(other.page(Some(&issued), 10, false).is_some());
+        assert!(r.page(Some(&issued), 10, false).is_none());
     }
 
     #[test]

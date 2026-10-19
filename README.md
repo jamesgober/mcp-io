@@ -96,7 +96,7 @@ A runnable server with a tool in each tier is [`examples/stdio_server.rs`](./exa
 
 ## Tools, validation, and errors
 
-- **Listing** is sorted by name, paginated with opaque cursors (`Server::with_page_size`, an unknown cursor is `-32602`), and carries `ttlMs`/`cacheScope` (`Server::with_cache`).
+- **Listing** is sorted by name, paginated with opaque cursors (`Server::with_page_size`, a cursor this server did not issue is `-32602`), and carries `ttlMs`/`cacheScope` (`Server::with_cache`).
 - **Arguments** are validated against the tool's `inputSchema` before the handler runs. A failure is a tool result with `isError: true` that names each problem by JSON Pointer, so the model can fix its call. It never quotes argument values; the paths hold property names, each clipped to 64 bytes (paths to 512, the whole report to 8 KiB).
 - **Results**: text, image, audio, resource links, embedded resources, and `structuredContent`. With an `outputSchema`, structured content must match it, and a text copy is added for clients that read only `content`.
 - **Errors**: a handler's `ToolError` is a tool execution error (`isError`); an unknown tool or malformed request is `-32602`; a panic is `-32603` and the server goes on. `ToolError::missing_capability` answers MCP's `-32021`.
