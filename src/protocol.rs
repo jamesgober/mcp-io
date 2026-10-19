@@ -92,6 +92,11 @@ impl core::fmt::Display for Era {
 
 /// The error for a request whose version this server does not serve.
 ///
+/// `supported` lists the versions a request may name in its `_meta`
+/// (`MODERN_PROTOCOL_VERSIONS`), not the legacy ones: those are negotiated
+/// by `initialize`, and a request that names one in `_meta` is refused, so
+/// listing them would invite a retry that fails the same way.
+///
 /// # Examples
 ///
 /// ```

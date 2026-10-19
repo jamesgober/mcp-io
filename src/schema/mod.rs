@@ -108,8 +108,8 @@ pub struct SchemaLimits {
     /// How many subschemas one schema may hold. Default 4,096.
     pub max_nodes: usize,
     /// How many subschema applications one validation may make. Default
-    /// 4,194,304 (one per value jsonx-lib's default budget lets a message
-    /// hold).
+    /// 4,194,304: four for each of the 1,048,576 values jsonx-lib's default
+    /// budget (which rpc-io's MCP limits keep) lets a message hold.
     pub max_steps: u64,
     /// How deeply subschema applications may nest during one validation:
     /// each level of the instance costs one, and each `$ref` followed one

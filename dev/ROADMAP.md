@@ -24,7 +24,7 @@ Delivered:
 - Execution: a bounded worker pool per connection (cancellation reaches running calls), `ToolCall` with cancellation and request-bound, increasing progress; `subscriptions/listen` with acknowledgment, `subscriptionId` tagging, `toolsListChanged`, and graceful closure on a server-side close; plain list changes for legacy sessions.
 - Typed tools: `ToolCall::decode::<T: FromJson>()` reads the arguments from the request's own text (types that borrow, such as `&str` and `Cow<str>`, borrow with no copy); `Server::tool_json` / `Tools::add_json` decode the arguments into an owned type and send a `ToJson` result as structured content; `JsonSchema` with `Tool::input_schema_for` / `output_schema_for` keeps a type's schema next to its decoder. The untyped `Value` path stays.
 - Transport: `Server::serve`/`serve_stdio` on rpc-io's newline framing and output queue, `Connection` over any `Sink`; end of input handles a last unterminated line and drains running calls (bounded by `with_drain_timeout`).
-- Tests: lifecycle, tools, permission, and transport suites; wire conformance against the official MCP JSON Schemas (2026-07-28, 2025-11-25) from the spec's examples; the JSON Schema Test Suite; property tests against reference implementations; an end-to-end child-process test; fuzz targets (`server`, `schema`) with their checks in `cargo test`; criterion benchmarks.
+- Tests: lifecycle, tools, permission, and transport suites; wire conformance against the official MCP JSON Schemas (2026-07-28, 2025-11-25, 2025-06-18) from the spec's examples, with object and non-object tool outputs; the JSON Schema Test Suite; property tests against reference implementations; an end-to-end child-process test; fuzz targets (`server`, `schema`) with their checks in `cargo test`; criterion benchmarks.
 
 Moved, per the anti-deferral rule:
 - **Progress and cancellation** (listed under v0.5.0) were delivered here: 2026-07-28 makes them part of serving any tool call (cancellation is how a stdio client abandons a call, and progress is request-scoped), and rpc-io 0.4 provides the request-bound progress handle.
@@ -41,6 +41,8 @@ Deferred, with reasons:
 - **A `tracing` feature**: optional instrumentation, as rpc-io's; v0.5.0.
 - **URL-mode elicitation and the Tasks extension**: v0.5.0 or later.
 - **`icons` on tools and on `Implementation`, and tool `_meta`** (audit Nice-to-have): optional display metadata; v0.5.0, with resources and prompts, which carry the same fields.
+- **Performance leftovers** (release audit MCP2-015): every result's text is checked once more when it is handed to rpc-io (`Raw::from_string`), and a typed result goes `ToJson` to text to a `Value` and back to text, so the output schema can see it. Both are linear in the size of the result; they go before 1.0, with a pre-checked raw constructor in rpc-io and a schema walk over `ToJson` output.
+- **criterion 0.8**: needs Rust 1.86, above the 1.85 MSRV; the benchmarks use 0.7, the newest that builds on 1.85, until the MSRV moves.
 - **The `extensions` map in capabilities** (audit MCP-ARC-09): no extension is implemented, so none is advertised; capabilities are rendered internally, so adding the map later is not a breaking change.
 
 ## v0.5.0 - Implementation

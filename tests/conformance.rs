@@ -5,8 +5,9 @@
 //! This is the check the official conformance suite calls `wire-schema-valid`;
 //! the suite itself drives servers over HTTP only, so it cannot run against
 //! this crate's stdio transport yet. The validator here is this crate's own
-//! (`mcp_io::Schema`): the release verification repeated the same checks with
-//! python-jsonschema. 2025-06-18's schema is draft-07; its `$schema` is
+//! (`mcp_io::Schema`); the release verification repeated the check on the
+//! stdio server with python-jsonschema, against the 2026-07-28 and
+//! 2025-11-25 schemas. 2025-06-18's schema is draft-07; its `$schema` is
 //! dropped before compiling, which its keywords allow (they mean the same in
 //! 2020-12: no tuple `items`, no `dependencies`), and the compile test below
 //! proves every definition compiles.
