@@ -4,10 +4,10 @@
 # `rustfmt.toml` pins `newline_style = "Unix"`.
 * text=auto eol=lf
 
-# Keep development-only paths out of `git archive` source tarballs.
+# Keep development-only paths out of `git archive` source tarballs. `docs/`
+# and `tests/` stay in: packagers run the tests from source archives, and the
+# README links the API reference.
 /.dev             export-ignore
 /.github          export-ignore
-/docs             export-ignore
-/tests            export-ignore
 /.gitignore       export-ignore
 /.editorconfig    export-ignore
