@@ -153,24 +153,50 @@ fn test_confirmations_show_the_arguments_in_full_or_refuse() {
         text(&reply)
     );
     assert!(reply["result"].get("requestState").is_none());
-    // Small enough: every byte is shown, non-ASCII escaped.
+    // Small enough: every byte is shown, as sent, with non-ASCII and
+    // control characters (DEL, sent raw here, included) escaped.
     let reply = ask(
         &mut client,
         2,
-        r#"{"target":"PRODUCTION","note":"caf\u00e9 \u202e"}"#,
+        "{\"target\":\"PRODUCTION\u{7f}\",\"note\":\"caf\\u00e9 \\u202e\"}",
     );
     let message = reply["result"]["inputRequests"]["confirm"]["params"]["message"]
         .as_str()
         .unwrap();
     assert!(
-        message.ends_with(r#"Arguments: {"note":"caf\u00e9 \u202e","target":"PRODUCTION"}"#),
+        message.ends_with(r#"Arguments: {"target":"PRODUCTION\u007f","note":"caf\u00e9 \u202e"}"#),
         "{message}"
     );
     assert!(
-        message.is_ascii(),
+        message.is_ascii() && !message.contains('\u{7f}'),
         "nothing in the arguments can disguise itself"
     );
     assert!(ran.lock().unwrap().is_empty());
+    // The confirmation binds the arguments as the tool receives them: the
+    // same value spelled otherwise is another call, refused, not run.
+    let retry = |client: &mut Client, id: u64, arguments: &str, state: &str| {
+        client.request(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{"elicitation":{{}}}}}},"name":"ship","arguments":{arguments},"requestState":"{state}","inputResponses":{{"confirm":{{"action":"accept","content":{{"confirm":true}}}}}}}}}}"#
+        ))
+    };
+    for (id, other) in [
+        (3, r#"{"n":1e2,"m":"A"}"#),
+        (5, r#"{"n":100.0,"m":"A"}"#),
+        (7, r#"{"m":"A","n":100}"#),
+    ] {
+        let reply = ask(&mut client, id, r#"{"n":100,"m":"A"}"#);
+        let state = reply["result"]["requestState"].as_str().unwrap().to_owned();
+        let reply = retry(&mut client, id + 1, other, &state);
+        assert_eq!(code(&reply), Some(-32602), "{other}");
+    }
+    assert!(ran.lock().unwrap().is_empty());
+    // Insignificant whitespace, and an escape for the same character, are
+    // the same arguments to the tool.
+    let reply = ask(&mut client, 9, r#"{"n":100,"m":"A"}"#);
+    let state = reply["result"]["requestState"].as_str().unwrap().to_owned();
+    let reply = retry(&mut client, 10, r#"{ "n": 100, "m": "\u0041" }"#, &state);
+    assert!(reply["result"].get("isError").is_none(), "{reply}");
+    assert_eq!(*ran.lock().unwrap(), [r#"{"n":100,"m":"A"}"#]);
 }
 
 #[test]

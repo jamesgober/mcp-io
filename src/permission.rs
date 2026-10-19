@@ -9,9 +9,10 @@
 //! 2. A `Publish` tool is never allowed outright: `Allow` is treated as
 //!    `Confirm`. No policy, setting, or earlier approval can skip it.
 //! 3. `Confirm` asks the user through the client, with MCP's own mechanism.
-//!    The question shows the call's arguments in full (canonical JSON,
-//!    non-ASCII escaped), never a part of them; a call too large to show is
-//!    refused. Then:
+//!    The question shows the call's arguments in full, as the tool
+//!    receives them (members in the order sent, numbers as spelled,
+//!    non-ASCII and control characters escaped), never a part of them; a
+//!    call too large to show is refused. Then:
 //!    on 2026-07-28, the call is answered with an `InputRequiredResult`
 //!    carrying a form-mode `elicitation/create` request and a single-use
 //!    `requestState`, and the tool runs only when the client retries the call
@@ -36,8 +37,8 @@
 //! # The confirmation state
 //!
 //! `requestState` is a random 128-bit token naming an entry the server keeps:
-//! the tool's registration, a keyed 128-bit digest of the call's canonical
-//! arguments, and an expiry. Nothing in the token itself is trusted. A
+//! the tool's registration, a keyed 128-bit digest of the call's arguments
+//! as shown, and an expiry. Nothing in the token itself is trusted. A
 //! tampered or replayed token names no entry and is refused (tokens are
 //! compared in constant time); an entry is
 //! removed when it is presented, so each confirmation runs at most one call;
@@ -249,7 +250,7 @@ struct Pending {
 }
 
 /// What a confirmation is bound to: the tool's registration and a keyed
-/// digest of the call's canonical arguments. The digest, not the text, is
+/// digest of the call's arguments as shown. The digest, not the text, is
 /// kept, so an entry costs the same whatever the arguments' size.
 #[derive(PartialEq, Eq)]
 struct Binding {
@@ -306,7 +307,7 @@ impl Ledger {
     }
 
     /// Records a confirmation for registration `generation` of `tool` with
-    /// `arguments` (canonical text), issued on `connection`, and returns its
+    /// `arguments` (as shown), issued on `connection`, and returns its
     /// token. Expired entries go first; past the connection's quota, its
     /// oldest entry goes, so one connection cannot evict another's.
     pub(crate) fn issue(

@@ -333,12 +333,16 @@ fn tool_error(job: &Prepared<'_>, message: String) -> String {
 
 /// Obtains the user's confirmation for a call, through the client.
 ///
-/// The user is shown the call's arguments in full, never a part of them:
-/// their canonical JSON with every non-ASCII character escaped (so no
-/// look-alike or direction-changing character can disguise them), and the
-/// confirmation is bound to exactly that text. Arguments whose shown form
-/// would exceed `Server::with_max_confirmed_arguments` are refused instead
-/// of shortened.
+/// The user is shown the call's arguments in full, never a part of them,
+/// as the tool will receive them: the members in the order sent and every
+/// number as spelled, written compactly, with every non-ASCII character and
+/// every control character (DEL included) escaped, so no look-alike,
+/// invisible, or direction-changing character can disguise them. The
+/// confirmation is bound to exactly that text, so a retry that spells the
+/// arguments differently (`1e2` for `100`, another member order) is
+/// refused rather than run with a spelling the user did not see. Arguments
+/// whose shown form would exceed `Server::with_max_confirmed_arguments`
+/// are refused instead of shortened.
 fn confirm(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> Confirmation {
     let refuse = |message: String| {
         Confirmation::Stop(
@@ -346,13 +350,9 @@ fn confirm(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> Con
             Answer::Result(tool_error(job, message)),
         )
     };
-    let Ok(canonical) = crate::schema::canonical_text(arguments) else {
-        return refuse(
-            "Permission denied: the arguments are too deeply nested to show for confirmation."
-                .to_owned(),
-        );
-    };
-    let shown = shown_arguments(&canonical);
+    let mut received = String::new();
+    crate::jsonx::write_value(&mut received, arguments);
+    let shown = shown_arguments(&received);
     let limit = job.shared.settings.max_confirmed_arguments;
     if shown.len() > limit {
         return refuse(format!(
@@ -368,14 +368,16 @@ fn confirm(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> Con
     }
 }
 
-/// `canonical` (JSON text) with every non-ASCII character written as a
-/// `\uXXXX` escape: the same JSON value, in text a person can read
-/// unambiguously.
-pub(crate) fn shown_arguments(canonical: &str) -> String {
+/// `json` (JSON text) with every non-ASCII character and every ASCII
+/// control character (DEL; the JSON writer escapes the others already)
+/// written as a `\uXXXX` escape: the same JSON value, in text a person can
+/// read unambiguously. Controls appear only inside strings, where the
+/// escape is valid JSON.
+pub(crate) fn shown_arguments(json: &str) -> String {
     use core::fmt::Write as _;
-    let mut out = String::with_capacity(canonical.len());
-    for c in canonical.chars() {
-        if c.is_ascii() {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() && !c.is_ascii_control() {
             out.push(c);
         } else {
             let mut units = [0u16; 2];
@@ -389,7 +391,7 @@ pub(crate) fn shown_arguments(canonical: &str) -> String {
 
 /// 2026-07-28: answer with an `InputRequiredResult`, or run on a retry that
 /// carries a valid `requestState` and the user's acceptance.
-fn confirm_modern(job: &Prepared<'_>, params: &Value<'_>, canonical: String) -> Confirmation {
+fn confirm_modern(job: &Prepared<'_>, params: &Value<'_>, shown: String) -> Confirmation {
     let name = &*job.entry.name;
     if let Some(state) = params.get("requestState") {
         let Some(state) = state.as_str() else {
@@ -400,7 +402,7 @@ fn confirm_modern(job: &Prepared<'_>, params: &Value<'_>, canonical: String) -> 
         match job
             .shared
             .ledger
-            .redeem(state, name, job.entry.generation, &canonical)
+            .redeem(state, name, job.entry.generation, &shown)
         {
             Ok(()) => {}
             Err(Redeem::Unknown | Redeem::Mismatch) => {
@@ -431,11 +433,11 @@ fn confirm_modern(job: &Prepared<'_>, params: &Value<'_>, canonical: String) -> 
         let required = jsonx::json!({ "elicitation": { "form": {} } });
         return stop_error(protocol::missing_capability(&required));
     }
-    let message = question(job, &canonical);
+    let message = question(job, &shown);
     let token = job
         .shared
         .ledger
-        .issue(job.connection, name, job.entry.generation, &canonical);
+        .issue(job.connection, name, job.entry.generation, &shown);
     let mut o = Obj::with_capacity(message.len() + 512);
     let _ = o
         .with("inputRequests", |out| {
@@ -450,7 +452,7 @@ fn confirm_modern(job: &Prepared<'_>, params: &Value<'_>, canonical: String) -> 
 
 /// 2025-11-25 and 2025-06-18: send `elicitation/create` to the client and
 /// wait for its answer, or for the `tools/call` to be cancelled.
-fn confirm_legacy(job: &Prepared<'_>, canonical: &str) -> Confirmation {
+fn confirm_legacy(job: &Prepared<'_>, shown: &str) -> Confirmation {
     let refuse = |message: &str| {
         Confirmation::Stop(
             Outcome::NotConfirmed,
@@ -470,7 +472,7 @@ fn confirm_legacy(job: &Prepared<'_>, canonical: &str) -> Confirmation {
              (it runs tool calls without worker threads); the tool was not run.",
         );
     }
-    let message = question(job, canonical);
+    let message = question(job, shown);
     let Ok(params) = json::raw(elicitation(&message, false)) else {
         return refuse("The confirmation request could not be built; the tool was not run.");
     };

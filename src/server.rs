@@ -579,7 +579,8 @@ impl Server {
 
     /// The largest arguments, in bytes as shown to the user, a call that
     /// needs confirmation may have (default 4 KiB). The user always sees a
-    /// call's arguments in full (canonical JSON, non-ASCII escaped); a call
+    /// call's arguments in full (as the tool receives them, non-ASCII and
+    /// control characters escaped); a call
     /// whose arguments would not fit is refused with a tool error rather
     /// than shown in part.
     #[must_use]

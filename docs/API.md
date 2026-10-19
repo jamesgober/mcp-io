@@ -408,9 +408,12 @@ panicking policy denies.
 `Confirm` asks the user through the client. On 2026-07-28 the call is
 answered with `resultType: "input_required"`, an `inputRequests.confirm`
 holding a form `elicitation/create` (the tool's `confirmation` question, the
-tool, its tier, and the arguments in full: canonical JSON with every
-non-ASCII character escaped), and a `requestState` bound to exactly that
-text. The user is never shown part of the arguments: a call whose shown
+tool, its tier, and the arguments in full as the tool receives them:
+members in the order sent, numbers as spelled, every non-ASCII and control
+character, DEL included, escaped), and a `requestState` bound to exactly
+that text, so a retry must send the same arguments spelled the same way
+(insignificant whitespace and string escapes aside, which the tool cannot
+see); `1e2` for `100`, or another member order, is refused. The user is never shown part of the arguments: a call whose shown
 arguments exceed `Server::with_max_confirmed_arguments` (4 KiB) is refused
 with a tool error instead. The server keeps only a keyed digest of the arguments, so a
 pending confirmation costs the same whatever their size; each connection may
@@ -423,7 +426,7 @@ confirmation was asked for, so a policy that counts calls counts it once.
 `decline`, `cancel`, or `confirm: false` is a tool error; a retry without an
 answer is asked again. A `requestState` names a server-side entry bound to
 the tool's registration (a tool removed and registered again does not
-inherit it) and the exact (canonical) arguments, valid for the confirmation
+inherit it) and the exact arguments, valid for the confirmation
 timeout and consumed when presented: a replayed, altered, expired, or
 mismatched one is `-32602`. Without form elicitation in the request's
 capabilities: `-32021`. On a legacy session the server sends

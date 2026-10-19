@@ -80,8 +80,6 @@ use core::fmt;
 
 use crate::jsonx::Value;
 
-pub(crate) use canon::text as canonical_text;
-
 /// Budgets for compiling and applying a [`Schema`].
 ///
 /// The defaults are generous for any schema written by hand and for any
