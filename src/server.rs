@@ -459,16 +459,18 @@ impl Server {
         self
     }
 
-    /// Calls `hook` once per `tools/call` with its [`AuditRecord`] (tool,
+    /// Calls `hook` once per `tools/call` request, refused ones included,
+    /// with its [`AuditRecord`] (tool,
     /// tier, request id, client name, outcome, time taken; never arguments
-    /// or results). The hook runs on the worker that handled the call; a
+    /// or results). The hook runs on the worker that handled the call (on
+    /// the reading thread for a call refused because the queue was full); a
     /// panicking hook is ignored.
     ///
     /// # Examples
     ///
     /// ```
     /// let server = mcp_io::Server::new(mcp_io::Implementation::new("demo", "0.1.0"))
-    ///     .on_audit(|record| eprintln!("{} [{}] {}", record.tool(), record.tier(), record.outcome()));
+    ///     .on_audit(|record| eprintln!("{:?} [{:?}] {}", record.tool(), record.tier(), record.outcome()));
     /// # let _ = server;
     /// ```
     #[must_use]

@@ -8,7 +8,8 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    call::{self, Job},
+    AuditRecord,
+    call::{self, Job, LegacySession},
     json::{self, Obj},
     jsonx::Value,
     pool::Pool,
@@ -83,6 +84,28 @@ impl Lifecycle {
     }
 }
 
+/// Classifies a request: modern by its `_meta`, else legacy if the
+/// connection's session negotiated `legacy` (its version).
+pub(crate) fn served<'v>(
+    params: &'v Value<'v>,
+    legacy: Option<&'static str>,
+    legacy_enabled: bool,
+) -> Result<Served<'v>, ErrorObject> {
+    match protocol::classify(params)? {
+        Classified::Modern(modern) => Ok(Served::Modern(modern)),
+        Classified::Unversioned => match legacy {
+            Some(version) => Ok(Served::Legacy(version)),
+            None if legacy_enabled => Err(ErrorObject::invalid_params(
+                "missing required `_meta.io.modelcontextprotocol/protocolVersion` \
+                 (clients of 2025-11-25 and earlier must send `initialize` first)",
+            )),
+            None => Err(ErrorObject::invalid_params(
+                "missing required `_meta.io.modelcontextprotocol/protocolVersion`",
+            )),
+        },
+    }
+}
+
 /// The era a request is served under, with what it needs from each.
 pub(crate) enum Served<'v> {
     Modern(protocol::Modern<'v>),
@@ -147,19 +170,11 @@ impl Session {
     /// Classifies a request: modern by its `_meta`, else legacy if a session
     /// was opened.
     fn era<'v>(&self, params: &'v Value<'v>) -> Result<Served<'v>, ErrorObject> {
-        match protocol::classify(params)? {
-            Classified::Modern(modern) => Ok(Served::Modern(modern)),
-            Classified::Unversioned => match self.lifecycle.protocol_version() {
-                Some(version) => Ok(Served::Legacy(version)),
-                None if self.shared.settings.legacy => Err(ErrorObject::invalid_params(
-                    "missing required `_meta.io.modelcontextprotocol/protocolVersion` \
-                     (clients of 2025-11-25 and earlier must send `initialize` first)",
-                )),
-                None => Err(ErrorObject::invalid_params(
-                    "missing required `_meta.io.modelcontextprotocol/protocolVersion`",
-                )),
-            },
-        }
+        served(
+            params,
+            self.lifecycle.protocol_version(),
+            self.shared.settings.legacy,
+        )
     }
 
     fn initialize(&mut self, params: &Params<'_>) -> Result<Raw<'static>, ErrorObject> {
@@ -298,83 +313,40 @@ impl Session {
         json::raw(self.shared.finish(o, era, "complete"))
     }
 
+    /// Admits a `tools/call` by its size and hands it to a worker, which
+    /// parses it (once) and does everything else.
     fn call_tool(&mut self, params: &Params<'_>, responder: Responder) {
-        match self.prepare_call(params, responder) {
-            Ok(()) => {}
-            Err(refused) => {
-                let (responder, error) = *refused;
-                // Cancelled or closed already: no one is waiting for it.
-                let _unanswerable = responder.err(error);
-            }
-        }
-    }
-
-    fn prepare_call(&mut self, params: &Params<'_>, responder: Responder) -> Result<(), Refusal> {
-        let value = match params.parse() {
-            Ok(value) => value,
-            Err(error) => return Err(refuse(responder, error)),
-        };
-        let (era, version, capabilities, client_info) = match self.era(&value) {
-            Ok(Served::Modern(m)) => (
-                Era::Modern,
-                m.version,
-                m.capabilities.clone().into_owned(),
-                m.client_info.map(|info| info.clone().into_owned()),
-            ),
-            Ok(Served::Legacy(version)) => (
-                Era::Legacy,
-                version,
-                self.legacy_capabilities.clone(),
-                self.legacy_client_info.clone(),
-            ),
-            Err(error) => return Err(refuse(responder, error)),
-        };
-        let Some(name) = value.get("name").and_then(Value::as_str) else {
-            return Err(refuse(
-                responder,
-                ErrorObject::invalid_params("`tools/call` needs `name` (a string)"),
-            ));
-        };
-        match value.get("arguments") {
-            None | Some(Value::Null | Value::Object(_)) => {}
-            Some(_) => {
-                return Err(refuse(
-                    responder,
-                    ErrorObject::invalid_params("`arguments` must be an object"),
-                ));
-            }
-        }
-        let Some(entry) = self.shared.registry.get(name) else {
-            let message = format!("Unknown tool: {}", protocol::clip(name, 128));
-            return Err(refuse(responder, ErrorObject::invalid_params(message)));
-        };
-        // What the job will hold: the parsed params, about their text's size.
         let bytes = params.raw().map_or(0, |raw| raw.as_str().len());
         if !self.pool.has_room(bytes) {
-            return Err(refuse(
-                responder,
-                ErrorObject::internal_error("the server is busy; retry the call later"),
+            let id = responder.id().clone();
+            // Cancelled or closed already: no one is waiting for it.
+            let _unanswerable = responder.err(ErrorObject::internal_error(
+                "the server is busy; retry the call later",
             ));
+            self.shared.audit(&AuditRecord::refused(&id));
+            return;
         }
-        let progress = responder.progress(params);
+        let legacy = self
+            .lifecycle
+            .protocol_version()
+            .map(|version| LegacySession {
+                version,
+                capabilities: self.legacy_capabilities.clone(),
+                client_info: self.legacy_client_info.clone(),
+            });
         let job = Job {
             shared: Arc::clone(&self.shared),
-            entry,
             text: params.raw().map(|raw| raw.clone().into_owned()),
-            era,
-            version,
-            capabilities,
-            client_info,
-            progress,
+            legacy,
+            progress: responder.progress(params),
             responder,
             received: std::time::Instant::now(),
             connection: self.connection,
         };
-        // Only this thread submits, and the load was checked above, so the
-        // pool has room; were it full anyway, the job (and its responder) is
-        // dropped, which answers with an internal error.
+        // Only this thread submits, and the room was checked above; were the
+        // pool full anyway, the job (and its responder) is dropped, which
+        // answers with an internal error.
         let _submitted = self.pool.submit(bytes, move || call::run(job));
-        Ok(())
     }
 
     fn listen(&mut self, params: &Params<'_>, responder: Responder) {

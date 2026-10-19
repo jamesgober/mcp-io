@@ -390,8 +390,8 @@ fn test_audit_records_every_outcome_without_arguments() {
     let server = server(&runs).with_workers(0).on_audit(move |record| {
         seen.lock().unwrap().push(format!(
             "{} {} {} {:?} {}",
-            record.tool(),
-            record.tier(),
+            record.tool().unwrap_or("-"),
+            record.tier().map_or("-", |tier| tier.name()),
             record.id(),
             record.client(),
             record.outcome()
@@ -405,6 +405,11 @@ fn test_audit_records_every_outcome_without_arguments() {
     let state = reply["result"]["requestState"].as_str().unwrap().to_owned();
     let _ = client.request(&call_with(4, "publish", FORM, &accept(&state)));
     let _ = client.request(&call_with(5, "publish", "{}", ""));
+    // Refused requests are audited too: an unknown tool, no name, no _meta.
+    let _ = client.request(&call(6, "nope", "{}"));
+    let _ = client.request(&common::modern(7, "tools/call", r#""arguments":{}"#));
+    let _ = client
+        .request(r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"read"}}"#);
     let records = records.lock().unwrap().clone();
     assert_eq!(
         records,
@@ -414,6 +419,9 @@ fn test_audit_records_every_outcome_without_arguments() {
             "publish publish 3 Some(\"test-client\") waiting for the user's confirmation",
             "publish publish 4 Some(\"test-client\") completed",
             "publish publish 5 Some(\"test-client\") not confirmed",
+            "- - 6 None refused: invalid request",
+            "- - 7 None refused: invalid request",
+            "- - 8 None refused: invalid request",
         ]
     );
     assert!(

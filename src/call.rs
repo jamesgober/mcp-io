@@ -36,22 +36,41 @@ const NO_PARAMS: &str = "{}";
 /// The key of the confirmation in `inputRequests` / `inputResponses`.
 const CONFIRM_KEY: &str = "confirm";
 
-/// One call, moved to a worker.
+/// One call, moved to a worker: its text, unparsed, and what the connection
+/// knows that the request does not say.
 pub(crate) struct Job {
     pub(crate) shared: Arc<Shared>,
-    pub(crate) entry: Arc<Entry>,
-    /// The request's `params` text (`None` when absent), parsed again on the
-    /// worker: the parsed tree and typed arguments borrow from it.
+    /// The request's `params` text (`None` when absent). Parsed once, on the
+    /// worker; the tree and typed arguments borrow from it.
     pub(crate) text: Option<Raw<'static>>,
-    pub(crate) era: Era,
-    pub(crate) version: &'static str,
-    pub(crate) capabilities: Value<'static>,
-    pub(crate) client_info: Option<Value<'static>>,
+    /// The connection's legacy session, if `initialize` opened one.
+    pub(crate) legacy: Option<LegacySession>,
     pub(crate) progress: Option<Progress>,
     pub(crate) responder: Responder,
     pub(crate) received: Instant,
     /// The connection the call came in on (for the confirmation quota).
     pub(crate) connection: u64,
+}
+
+/// What a legacy session negotiated, copied into the calls it makes.
+pub(crate) struct LegacySession {
+    pub(crate) version: &'static str,
+    pub(crate) capabilities: Value<'static>,
+    pub(crate) client_info: Option<Value<'static>>,
+}
+
+/// A call that passed the request checks: its tool and who is asking.
+struct Prepared<'j> {
+    shared: &'j Arc<Shared>,
+    entry: Arc<Entry>,
+    text: Option<&'j Raw<'static>>,
+    era: Era,
+    version: &'static str,
+    capabilities: Value<'static>,
+    client_info: Option<Value<'static>>,
+    progress: Option<&'j Progress>,
+    responder: &'j Responder,
+    connection: u64,
 }
 
 /// How a call is answered.
@@ -79,22 +98,34 @@ pub(crate) fn run(job: Job) {
         None => Ok(Value::Null),
         Some(raw) => raw.parse_with(&parser),
     };
+    let mut seen: Option<(Arc<Entry>, Era, Option<String>)> = None;
     let (outcome, answer) = match &parsed {
-        Ok(params) => {
-            let empty = Value::Object(jsonx::Object::new());
-            let arguments = match params.get("arguments") {
-                Some(arguments @ Value::Object(_)) => arguments,
-                _ => &empty,
-            };
-            execute(&job, params, arguments)
-        }
-        // The endpoint has parsed this text within the same budgets already.
+        // rpc-io has validated this text within the same budgets.
         Err(_) => (
             Outcome::Failed,
             Answer::Error(ErrorObject::internal_error(
-                "the call's params could not be read again",
+                "the call's params could not be read",
             )),
         ),
+        Ok(params) => match prepare(&job, params) {
+            Err(error) => (Outcome::Refused, Answer::Error(error)),
+            Ok(call) => {
+                let empty = Value::Object(jsonx::Object::new());
+                let arguments = match params.get("arguments") {
+                    Some(arguments @ Value::Object(_)) => arguments,
+                    _ => &empty,
+                };
+                let answered = execute(&call, params, arguments);
+                let client = call
+                    .client_info
+                    .as_ref()
+                    .and_then(|info| info.get("name"))
+                    .and_then(Value::as_str)
+                    .map(|name| protocol::clip(name, 128).to_owned());
+                seen = Some((Arc::clone(&call.entry), call.era, client));
+                answered
+            }
+        },
     };
     let id = job.responder.id().clone();
     let sent = match answer {
@@ -109,23 +140,75 @@ pub(crate) fn run(job: Job) {
     // connection (`Closed`) has no one waiting; MCP forbids answering the
     // former, and rpc-io has already dropped it.
     let _unanswerable = sent;
-    let client = job
-        .client_info
-        .as_ref()
-        .and_then(|info| info.get("name"))
-        .and_then(Value::as_str);
-    job.shared.audit(&AuditRecord {
-        tool: &job.entry.name,
-        tier: job.entry.tier,
-        id: &id,
-        era: job.era,
-        client,
-        outcome,
-        elapsed: job.received.elapsed(),
-    });
+    let record = match &seen {
+        Some((entry, era, client)) => AuditRecord {
+            tool: Some(&entry.name),
+            tier: Some(entry.tier),
+            id: &id,
+            era: Some(*era),
+            client: client.as_deref(),
+            outcome,
+            elapsed: job.received.elapsed(),
+        },
+        None => AuditRecord {
+            elapsed: job.received.elapsed(),
+            outcome,
+            ..AuditRecord::refused(&id)
+        },
+    };
+    job.shared.audit(&record);
 }
 
-fn execute(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> (Outcome, Answer) {
+/// The checks of the request itself: era, `name`, `arguments`, the tool.
+/// Their failures are protocol errors (`-32602`, `-32022`).
+fn prepare<'j>(job: &'j Job, params: &Value<'_>) -> Result<Prepared<'j>, ErrorObject> {
+    let legacy_version = job.legacy.as_ref().map(|l| l.version);
+    let (era, version, capabilities, client_info) =
+        match crate::session::served(params, legacy_version, job.shared.settings.legacy)? {
+            crate::session::Served::Modern(m) => (
+                Era::Modern,
+                m.version,
+                m.capabilities.clone().into_owned(),
+                m.client_info.map(|info| info.clone().into_owned()),
+            ),
+            crate::session::Served::Legacy(version) => {
+                let session = job.legacy.as_ref();
+                (
+                    Era::Legacy,
+                    version,
+                    session.map_or(Value::Null, |s| s.capabilities.clone()),
+                    session.and_then(|s| s.client_info.clone()),
+                )
+            }
+        };
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return Err(ErrorObject::invalid_params(
+            "`tools/call` needs `name` (a string)",
+        ));
+    };
+    match params.get("arguments") {
+        None | Some(Value::Null | Value::Object(_)) => {}
+        Some(_) => return Err(ErrorObject::invalid_params("`arguments` must be an object")),
+    }
+    let Some(entry) = job.shared.registry.get(name) else {
+        let message = format!("Unknown tool: {}", protocol::clip(name, 128));
+        return Err(ErrorObject::invalid_params(message));
+    };
+    Ok(Prepared {
+        shared: &job.shared,
+        entry,
+        text: job.text.as_ref(),
+        era,
+        version,
+        capabilities,
+        client_info,
+        progress: job.progress.as_ref(),
+        responder: &job.responder,
+        connection: job.connection,
+    })
+}
+
+fn execute(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> (Outcome, Answer) {
     if job.responder.is_cancelled() {
         return (Outcome::Cancelled, Answer::Nothing);
     }
@@ -179,8 +262,8 @@ fn execute(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> (Outcome, An
         capabilities: &job.capabilities,
         client_info: job.client_info.as_ref(),
         token: job.responder.token(),
-        progress: job.progress.as_ref(),
-        text: job.text.as_ref().map_or(NO_PARAMS, Raw::as_str),
+        progress: job.progress,
+        text: job.text.map_or(NO_PARAMS, Raw::as_str),
         parser: job.shared.settings.limits.parser(),
     };
     let outcome = catch_unwind(AssertUnwindSafe(|| (job.entry.handler)(&call)));
@@ -201,7 +284,7 @@ fn execute(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> (Outcome, An
 }
 
 /// Checks a handler's result against the output schema and renders it.
-fn finish(job: &Job, result: &ToolResult) -> (Outcome, Answer) {
+fn finish(job: &Prepared<'_>, result: &ToolResult) -> (Outcome, Answer) {
     if !result.is_error() {
         if let Some(schema) = &job.entry.output {
             let conforms = result
@@ -231,7 +314,7 @@ fn finish(job: &Job, result: &ToolResult) -> (Outcome, Answer) {
 }
 
 /// A tool execution error result (`isError: true`) with `message`.
-fn tool_error(job: &Job, message: String) -> String {
+fn tool_error(job: &Prepared<'_>, message: String) -> String {
     let mut o = Obj::with_capacity(message.len() + 96);
     ToolResult::error(message).write_members(&mut o, job.era == Era::Legacy);
     job.shared.finish(o, job.era, "complete")
@@ -245,7 +328,7 @@ fn tool_error(job: &Job, message: String) -> String {
 /// confirmation is bound to exactly that text. Arguments whose shown form
 /// would exceed `Server::with_max_confirmed_arguments` are refused instead
 /// of shortened.
-fn confirm(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> Confirmation {
+fn confirm(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> Confirmation {
     let refuse = |message: String| {
         Confirmation::Stop(
             Outcome::NotConfirmed,
@@ -295,7 +378,7 @@ pub(crate) fn shown_arguments(canonical: &str) -> String {
 
 /// 2026-07-28: answer with an `InputRequiredResult`, or run on a retry that
 /// carries a valid `requestState` and the user's acceptance.
-fn confirm_modern(job: &Job, params: &Value<'_>, canonical: String) -> Confirmation {
+fn confirm_modern(job: &Prepared<'_>, params: &Value<'_>, canonical: String) -> Confirmation {
     let name = &*job.entry.name;
     if let Some(state) = params.get("requestState") {
         let Some(state) = state.as_str() else {
@@ -356,7 +439,7 @@ fn confirm_modern(job: &Job, params: &Value<'_>, canonical: String) -> Confirmat
 
 /// 2025-11-25 and 2025-06-18: send `elicitation/create` to the client and
 /// wait for its answer, or for the `tools/call` to be cancelled.
-fn confirm_legacy(job: &Job, canonical: &str) -> Confirmation {
+fn confirm_legacy(job: &Prepared<'_>, canonical: &str) -> Confirmation {
     let refuse = |message: &str| {
         Confirmation::Stop(
             Outcome::NotConfirmed,
@@ -469,7 +552,7 @@ fn read_answer(response: Option<&Value<'_>>) -> Answer3 {
 /// The question put to the user: the tool's own wording, then what will run.
 /// The question put to the user: the tool's own wording, then exactly what
 /// will run (`shown`: the full arguments, see [`confirm`]).
-fn question(job: &Job, shown: &str) -> String {
+fn question(job: &Prepared<'_>, shown: &str) -> String {
     let asked = job
         .entry
         .confirmation

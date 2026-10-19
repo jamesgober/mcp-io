@@ -468,10 +468,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## `AuditRecord` and `Outcome`
 
-The hook from `Server::on_audit` gets one `AuditRecord` per `tools/call`:
-`tool()`, `tier()`, `id()`, `era()`, `client()` (self-reported name),
+The hook from `Server::on_audit` gets one `AuditRecord` per `tools/call`
+request, refused ones included: `tool()`, `tier()`, `era()` (each an
+`Option`: `None` for a request refused before it named a registered tool or
+an era), `id()`, `client()` (self-reported name, clipped to 128 bytes),
 `outcome()`, `elapsed()`. Never the arguments or the result. `Outcome`
-(`#[non_exhaustive]`): `InvalidArguments`, `Denied`,
+(`#[non_exhaustive]`): `Refused` (a JSON-RPC error: unknown tool, malformed
+request, unsupported version, no session, full queue), `InvalidArguments`, `Denied`,
 `ConfirmationRequested`, `NotConfirmed`, `Completed { is_error }`, `Failed`,
 `Cancelled`; `ran()` says whether the handler ran. A panicking hook is
 ignored.

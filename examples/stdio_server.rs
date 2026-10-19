@@ -37,8 +37,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .on_audit(|record| {
         eprintln!(
             "[audit] {} ({}) by {:?}: {}",
-            record.tool(),
-            record.tier(),
+            record.tool().unwrap_or("-"),
+            record.tier().map_or("-", |tier| tier.name()),
             record.client(),
             record.outcome()
         )

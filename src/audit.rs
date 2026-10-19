@@ -18,6 +18,11 @@ use crate::{Tier, protocol::Era, rpc_io::Id};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Outcome {
+    /// The request itself was refused with a JSON-RPC error before it
+    /// reached the gate: an unknown tool, a missing `name`, malformed
+    /// params or `_meta`, an unsupported version, no legacy session, or a
+    /// full call queue. The handler did not run.
+    Refused,
     /// The arguments failed the input schema; the handler did not run.
     InvalidArguments,
     /// The policy denied the call; the handler did not run.
@@ -55,6 +60,7 @@ impl Outcome {
 impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Refused => "refused: invalid request",
             Self::InvalidArguments => "refused: invalid arguments",
             Self::Denied => "denied by the policy",
             Self::ConfirmationRequested => "waiting for the user's confirmation",
@@ -70,28 +76,45 @@ impl fmt::Display for Outcome {
 /// One tool call's record: who asked for what, when, and how it ended.
 /// Never the arguments or the result, which may be sensitive.
 ///
-/// Passed to the hook set with [`Server::on_audit`](crate::Server::on_audit).
+/// Passed to the hook set with [`Server::on_audit`](crate::Server::on_audit)
+/// for every `tools/call` request, refused ones included
+/// ([`Outcome::Refused`], with no tool, tier, or era when the request did
+/// not get far enough to name them).
 #[derive(Debug)]
 pub struct AuditRecord<'a> {
-    pub(crate) tool: &'a str,
-    pub(crate) tier: Tier,
+    pub(crate) tool: Option<&'a str>,
+    pub(crate) tier: Option<Tier>,
     pub(crate) id: &'a Id<'static>,
-    pub(crate) era: Era,
+    pub(crate) era: Option<Era>,
     pub(crate) client: Option<&'a str>,
     pub(crate) outcome: Outcome,
     pub(crate) elapsed: Duration,
 }
 
 impl<'a> AuditRecord<'a> {
-    /// The tool's name.
+    /// A refused request's record: no tool, tier, or era.
+    pub(crate) fn refused(id: &'a Id<'static>) -> Self {
+        Self {
+            tool: None,
+            tier: None,
+            id,
+            era: None,
+            client: None,
+            outcome: Outcome::Refused,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    /// The registered tool the call named; `None` for a request refused
+    /// before a registered tool was found.
     #[must_use]
-    pub fn tool(&self) -> &'a str {
+    pub fn tool(&self) -> Option<&'a str> {
         self.tool
     }
 
-    /// The tool's tier.
+    /// The tool's tier (`None` with [`tool`](Self::tool)).
     #[must_use]
-    pub fn tier(&self) -> Tier {
+    pub fn tier(&self) -> Option<Tier> {
         self.tier
     }
 
@@ -101,13 +124,15 @@ impl<'a> AuditRecord<'a> {
         self.id
     }
 
-    /// The protocol era of the call.
+    /// The protocol era of the call; `None` for a request refused before
+    /// its era was known.
     #[must_use]
-    pub fn era(&self) -> Era {
+    pub fn era(&self) -> Option<Era> {
         self.era
     }
 
-    /// The client's self-reported name, if it sent one (unverified).
+    /// The client's self-reported name, if it sent one (unverified; clipped
+    /// to 128 bytes).
     #[must_use]
     pub fn client(&self) -> Option<&'a str> {
         self.client
@@ -143,6 +168,13 @@ mod tests {
             Outcome::Cancelled,
         ];
         let ran: Vec<bool> = all.iter().map(|o| o.ran()).collect();
+        assert!(!Outcome::Refused.ran() && !Outcome::Refused.to_string().is_empty());
+        let id = Id::from(1);
+        let refused = AuditRecord::refused(&id);
+        assert_eq!(
+            (refused.tool(), refused.tier(), refused.era()),
+            (None, None, None)
+        );
         assert_eq!(ran, [false, false, false, false, true, true, true, false]);
         for outcome in all {
             assert!(!outcome.to_string().is_empty());
@@ -153,17 +185,17 @@ mod tests {
     fn test_record_accessors() {
         let id = Id::from(3);
         let record = AuditRecord {
-            tool: "t",
-            tier: Tier::Publish,
+            tool: Some("t"),
+            tier: Some(Tier::Publish),
             id: &id,
-            era: Era::Modern,
+            era: Some(Era::Modern),
             client: Some("c"),
             outcome: Outcome::Denied,
             elapsed: Duration::from_millis(2),
         };
         assert_eq!(
             (record.tool(), record.tier(), record.id(), record.era()),
-            ("t", Tier::Publish, &id, Era::Modern)
+            (Some("t"), Some(Tier::Publish), &id, Some(Era::Modern))
         );
         assert_eq!(
             (record.client(), record.outcome(), record.elapsed()),
