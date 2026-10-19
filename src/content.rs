@@ -463,8 +463,10 @@ impl ToolResult {
 
     /// Writes the result's members (`content`, `structuredContent`,
     /// `isError`) into `o`, adding the text copy of structured content when
-    /// there is no other content.
-    pub(crate) fn write_members(&self, o: &mut Obj) {
+    /// there is no other content. For a legacy session (`legacy`),
+    /// structured content that is not an object is sent as that text only:
+    /// 2025-11-25 and 2025-06-18 allow only object `structuredContent`.
+    pub(crate) fn write_members(&self, o: &mut Obj, legacy: bool) {
         let fallback;
         let blocks: &[Content] = match (&self.structured, self.content.is_empty()) {
             (Some(structured), true) => {
@@ -484,7 +486,9 @@ impl ToolResult {
             out.push(']');
         });
         if let Some(structured) = &self.structured {
-            let _ = o.value("structuredContent", structured);
+            if !legacy || structured.as_object().is_some() {
+                let _ = o.value("structuredContent", structured);
+            }
         }
         if self.is_error {
             let _ = o.bool("isError", true);
@@ -634,7 +638,7 @@ mod tests {
 
     fn members(result: &ToolResult) -> String {
         let mut o = Obj::new();
-        result.write_members(&mut o);
+        result.write_members(&mut o, false);
         o.finish()
     }
 

@@ -352,11 +352,7 @@ impl Tool {
     pub(crate) fn check(&self) -> Result<(), RegisterError> {
         check_name(&self.name)?;
         if let Some(schema) = &self.input_schema {
-            let is_object_schema = schema
-                .as_object()
-                .and_then(|o| o.get("type"))
-                .is_some_and(|t| t == "object");
-            if !is_object_schema {
+            if !is_object_schema(schema) {
                 return Err(RegisterError::InputSchemaNotObject {
                     tool: self.name.clone(),
                 });
@@ -365,8 +361,12 @@ impl Tool {
         Ok(())
     }
 
-    /// The tool's definition as MCP's `Tool` object, in JSON text.
-    pub(crate) fn definition_json(&self) -> String {
+    /// The tool's definition as MCP's `Tool` object, in JSON text. For a
+    /// legacy session (`legacy`), an output schema whose root is not
+    /// `"type": "object"` is left out: 2025-11-25 and 2025-06-18 allow only
+    /// object output schemas (and object structured content, which the
+    /// result writer then sends as text only).
+    pub(crate) fn definition_json(&self, legacy: bool) -> String {
         let mut o = Obj::with_capacity(256);
         let _ = o
             .str("name", &self.name)
@@ -381,7 +381,9 @@ impl Tool {
             }
         }
         if let Some(schema) = &self.output_schema {
-            let _ = o.value("outputSchema", schema);
+            if !legacy || is_object_schema(schema) {
+                let _ = o.value("outputSchema", schema);
+            }
         }
         let annotations = self.annotations_json();
         let _ = o.raw("annotations", &annotations);
@@ -415,6 +417,14 @@ pub trait JsonSchema {
     /// The schema (JSON Schema 2020-12, within the supported subset: see
     /// [`schema`](crate::schema)).
     fn json_schema() -> Value<'static>;
+}
+
+/// Whether `schema`'s root is `"type": "object"`.
+pub(crate) fn is_object_schema(schema: &Value<'_>) -> bool {
+    schema
+        .as_object()
+        .and_then(|o| o.get("type"))
+        .is_some_and(|t| t == "object")
 }
 
 /// The input schema of a tool that takes no arguments, as MCP recommends.
@@ -534,7 +544,7 @@ mod tests {
             .description("d")
             .output_schema(json!({ "type": "integer" }));
         assert_eq!(
-            tool.definition_json(),
+            tool.definition_json(false),
             r#"{"name":"t","title":"T","description":"d","inputSchema":{"type":"object","additionalProperties":false},"outputSchema":{"type":"integer"},"annotations":{"readOnlyHint":true}}"#
         );
         assert_eq!(Tier::Publish.to_string(), "publish");

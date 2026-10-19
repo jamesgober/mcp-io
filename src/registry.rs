@@ -30,6 +30,8 @@ pub(crate) struct Entry {
     pub(crate) confirmation: Option<String>,
     /// The `Tool` object of `tools/list`, rendered once.
     pub(crate) definition: String,
+    /// The same for legacy sessions (no non-object output schema).
+    pub(crate) legacy_definition: String,
     pub(crate) input: Schema,
     pub(crate) output: Option<Schema>,
     pub(crate) handler: Handler,
@@ -109,7 +111,8 @@ impl Registry {
         let entry = Arc::new(Entry {
             name: tool.name.as_str().into(),
             tier: tool.tier,
-            definition: tool.definition_json(),
+            definition: tool.definition_json(false),
+            legacy_definition: tool.definition_json(true),
             confirmation: tool.confirmation,
             input,
             output,
@@ -171,6 +174,7 @@ impl Registry {
         &self,
         cursor: Option<&str>,
         size: usize,
+        legacy: bool,
     ) -> Option<(String, Option<String>)> {
         let after = match cursor {
             None => None,
@@ -194,7 +198,11 @@ impl Registry {
             if i > 0 {
                 out.push(',');
             }
-            out.push_str(&entry.definition);
+            out.push_str(if legacy {
+                &entry.legacy_definition
+            } else {
+                &entry.definition
+            });
             last = Some(name);
         }
         let next = match (range.next(), last) {
@@ -440,12 +448,12 @@ mod tests {
     #[test]
     fn test_pages_are_sorted_and_cover_everything_once() {
         let r = registry(&["c", "a", "e", "b", "d"]);
-        let (page, next) = r.page(None, 2).unwrap_or_default();
+        let (page, next) = r.page(None, 2, false).unwrap_or_default();
         assert_eq!(names_of(&page), ["a", "b"]);
         assert_eq!(next.as_deref(), Some("after:b"));
-        let (page, next) = r.page(next.as_deref(), 2).unwrap_or_default();
+        let (page, next) = r.page(next.as_deref(), 2, false).unwrap_or_default();
         assert_eq!(names_of(&page), ["c", "d"]);
-        let (page, next) = r.page(next.as_deref(), 2).unwrap_or_default();
+        let (page, next) = r.page(next.as_deref(), 2, false).unwrap_or_default();
         assert_eq!(names_of(&page), ["e"]);
         assert_eq!(next, None);
     }
@@ -453,9 +461,9 @@ mod tests {
     #[test]
     fn test_cursor_survives_changes_between_pages() {
         let r = registry(&["a", "b", "c"]);
-        let (_, next) = r.page(None, 1).unwrap_or_default();
+        let (_, next) = r.page(None, 1, false).unwrap_or_default();
         assert!(r.remove("a") && r.remove("b"));
-        let (page, _) = r.page(next.as_deref(), 1).unwrap_or_default();
+        let (page, _) = r.page(next.as_deref(), 1, false).unwrap_or_default();
         assert_eq!(names_of(&page), ["c"]);
     }
 
@@ -463,10 +471,10 @@ mod tests {
     fn test_foreign_cursors_are_refused() {
         let r = registry(&["a"]);
         for cursor in ["", "a", "after:", "after:bad name", "before:a"] {
-            assert!(r.page(Some(cursor), 10).is_none(), "{cursor}");
+            assert!(r.page(Some(cursor), 10, false).is_none(), "{cursor}");
         }
         assert!(
-            r.page(Some("after:zzz"), 10)
+            r.page(Some("after:zzz"), 10, false)
                 .is_some_and(|(page, next)| page.is_empty() && next.is_none())
         );
     }

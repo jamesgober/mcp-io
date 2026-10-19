@@ -4,7 +4,12 @@
 //!
 //! This is the check the official conformance suite calls `wire-schema-valid`;
 //! the suite itself drives servers over HTTP only, so it cannot run against
-//! this crate's stdio transport yet.
+//! this crate's stdio transport yet. The validator here is this crate's own
+//! (`mcp_io::Schema`): the release verification repeated the same checks with
+//! python-jsonschema. 2025-06-18's schema is draft-07; its `$schema` is
+//! dropped before compiling, which its keywords allow (they mean the same in
+//! 2020-12: no tuple `items`, no `dependencies`), and the compile test below
+//! proves every definition compiles.
 
 #![allow(clippy::unwrap_used, clippy::panic)]
 
@@ -18,28 +23,40 @@ use mcp_io::{
     jsonx::{self, Value, json},
 };
 
+const REVISIONS: [&str; 3] = ["2026-07-28", "2025-11-25", "2025-06-18"];
+
 fn spec(revision: &str) -> &'static Value<'static> {
-    static MODERN: OnceLock<Value<'static>> = OnceLock::new();
-    static LEGACY: OnceLock<Value<'static>> = OnceLock::new();
-    let cell = if revision == "2026-07-28" {
-        &MODERN
-    } else {
-        &LEGACY
-    };
-    cell.get_or_init(|| {
+    static CELLS: [OnceLock<Value<'static>>; 3] =
+        [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    let at = REVISIONS.iter().position(|r| *r == revision).unwrap();
+    CELLS[at].get_or_init(|| {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("tests/data/mcp-schema/{revision}.json"));
-        jsonx::parse(&fs::read_to_string(path).unwrap())
+        let mut doc = jsonx::parse(&fs::read_to_string(path).unwrap())
             .unwrap()
-            .into_owned()
+            .into_owned();
+        // Draft-07 (2025-06-18): read as 2020-12 (see the module docs).
+        if doc["$schema"] == "http://json-schema.org/draft-07/schema#" {
+            let _dropped = doc.as_object_mut().unwrap().remove("$schema");
+        }
+        doc
     })
+}
+
+/// Where a revision keeps its definitions.
+fn defs_key(revision: &str) -> &'static str {
+    if revision == "2025-06-18" {
+        "definitions"
+    } else {
+        "$defs"
+    }
 }
 
 /// Asserts `message` is valid against definition `def` of `revision`.
 fn assert_conforms(revision: &str, def: &str, message: &Value<'_>) {
     let mut document = spec(revision).clone();
     let root = document.as_object_mut().unwrap();
-    root.push("$ref", format!("#/$defs/{def}"));
+    root.push("$ref", format!("#/{}/{def}", defs_key(revision)));
     let schema = Schema::compile(&document).unwrap_or_else(|e| panic!("{revision} {def}: {e}"));
     if let Err(errors) = schema.validate(message) {
         panic!("{revision} {def}: {errors}\n{message}");
@@ -235,16 +252,16 @@ fn test_legacy_session_conforms_to_2025_11_25() {
 
 #[test]
 fn test_the_official_schemas_compile_under_the_supported_subset() {
-    // Both revisions' schemas use only supported keywords, so the checks
+    // Every revision's schema uses only supported keywords, so the checks
     // above are complete, not partial.
-    for revision in ["2026-07-28", "2025-11-25"] {
-        let defs = spec(revision)["$defs"].as_object().unwrap();
+    for revision in REVISIONS {
+        let defs = spec(revision)[defs_key(revision)].as_object().unwrap();
         for (name, _) in defs.iter() {
             let mut document = spec(revision).clone();
             document
                 .as_object_mut()
                 .unwrap()
-                .push("$ref", format!("#/$defs/{name}"));
+                .push("$ref", format!("#/{}/{name}", defs_key(revision)));
             assert!(Schema::compile(&document).is_ok(), "{revision} {name}");
         }
     }
@@ -280,4 +297,92 @@ fn test_server_side_close_ends_subscriptions_gracefully() {
         "the cancelled stream gets nothing"
     );
     client.connection.close();
+}
+
+/// Tools whose outputs are not objects: an integer output schema, an array
+/// result with no schema, and an object one for contrast.
+fn output_shapes() -> Server {
+    Server::new(Implementation::new("shapes", "1.0.0"))
+        .with_workers(0)
+        .tool(
+            Tool::new("count", Tier::ReadOnly).output_schema(json!({ "type": "integer" })),
+            |_| Ok(ToolResult::structured(json!(5))),
+        )
+        .unwrap()
+        .tool(Tool::new("list", Tier::ReadOnly), |_| {
+            Ok(ToolResult::text("two items").with_structured(json!(["a", "b"])))
+        })
+        .unwrap()
+        .tool(
+            Tool::new("pair", Tier::ReadOnly).output_schema(json!({ "type": "object" })),
+            |_| Ok(ToolResult::structured(json!({ "a": 1 }))),
+        )
+        .unwrap()
+}
+
+#[test]
+fn test_non_object_outputs_conform_on_every_revision() {
+    for revision in REVISIONS {
+        let server = output_shapes();
+        let mut client = Client::new(&server);
+        let modern = revision == "2026-07-28";
+        let request = |id: u64, method: &str, params: &str| {
+            if modern {
+                common::modern(id, method, params)
+            } else {
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{{{params}}}}}"#
+                )
+            }
+        };
+        if !modern {
+            let reply = client.request(&common::initialize(0, revision, "{}"));
+            assert_eq!(reply["result"]["protocolVersion"], revision);
+            assert_conforms(revision, "InitializeResult", &reply["result"]);
+            client.send(common::INITIALIZED);
+        }
+        let reply = client.request(&request(1, "tools/list", ""));
+        let tools = reply["result"]["tools"].as_array().unwrap();
+        let count = tools.iter().find(|t| t["name"] == "count").unwrap();
+        // 2026-07-28 allows any output schema; the legacy revisions only
+        // object ones, so a legacy session is not shown the integer one.
+        assert_eq!(count.get("outputSchema").is_some(), modern, "{revision}");
+        let pair = tools.iter().find(|t| t["name"] == "pair").unwrap();
+        assert!(pair.get("outputSchema").is_some(), "{revision}");
+        if modern {
+            assert_conforms(revision, "ListToolsResultResponse", &reply);
+        } else {
+            assert_conforms(revision, "ListToolsResult", &reply["result"]);
+        }
+        for (id, tool, structured) in [
+            (2, "count", "5"),
+            (3, "list", r#"["a","b"]"#),
+            (4, "pair", r#"{"a":1}"#),
+        ] {
+            let reply = client.request(&request(id, "tools/call", &format!(r#""name":"{tool}""#)));
+            let result = &reply["result"];
+            let sent = result.get("structuredContent").map(ToString::to_string);
+            if modern || tool == "pair" {
+                assert_eq!(sent.as_deref(), Some(structured), "{revision} {tool}");
+            } else {
+                assert_eq!(
+                    sent, None,
+                    "{revision} {tool}: a legacy session gets text only"
+                );
+                assert!(result["content"].to_string().contains(&if tool == "count" {
+                    "5".to_owned()
+                } else {
+                    "two items".to_owned()
+                }));
+            }
+            if modern {
+                assert_conforms(revision, "CallToolResultResponse", &reply);
+            } else {
+                assert_conforms(revision, "CallToolResult", result);
+            }
+        }
+        for text in &client.log {
+            assert_conforms(revision, "JSONRPCMessage", &jsonx::parse(text).unwrap());
+        }
+    }
 }

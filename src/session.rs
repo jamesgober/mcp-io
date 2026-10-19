@@ -279,7 +279,7 @@ impl Session {
         let (tools, next) = self
             .shared
             .registry
-            .page(cursor, settings.page_size)
+            .page(cursor, settings.page_size, era == Era::Legacy)
             .ok_or_else(|| {
                 ErrorObject::invalid_params("invalid cursor: list from the start, without one")
             })?;

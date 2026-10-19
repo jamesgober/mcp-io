@@ -208,7 +208,7 @@ fn finish(job: &Job, result: &ToolResult) -> (Outcome, Answer) {
         }
     }
     let mut o = Obj::with_capacity(256);
-    result.write_members(&mut o);
+    result.write_members(&mut o, job.era == Era::Legacy);
     let text = job.shared.finish(o, job.era, "complete");
     (
         Outcome::Completed {
@@ -221,7 +221,7 @@ fn finish(job: &Job, result: &ToolResult) -> (Outcome, Answer) {
 /// A tool execution error result (`isError: true`) with `message`.
 fn tool_error(job: &Job, message: String) -> String {
     let mut o = Obj::with_capacity(message.len() + 96);
-    ToolResult::error(message).write_members(&mut o);
+    ToolResult::error(message).write_members(&mut o, job.era == Era::Legacy);
     job.shared.finish(o, job.era, "complete")
 }
 
