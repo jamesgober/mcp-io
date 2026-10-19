@@ -8,21 +8,29 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
-#![deny(unused_must_use)]
-#![deny(unused_results)]
-#![deny(clippy::unwrap_used)]
-#![deny(clippy::expect_used)]
-#![deny(clippy::todo)]
-#![deny(clippy::unimplemented)]
-#![deny(clippy::print_stdout)]
-#![deny(clippy::print_stderr)]
-#![deny(clippy::dbg_macro)]
+#![deny(
+    warnings,
+    missing_docs,
+    unsafe_op_in_unsafe_fn,
+    unused_must_use,
+    unused_results,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::dbg_macro,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::undocumented_unsafe_blocks,
+    clippy::missing_safety_doc
+)]
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn scaffold_compiles() {
+    fn test_scaffold_compiles_as_mcp_io() {
         assert_eq!(env!("CARGO_PKG_NAME"), "mcp-io");
     }
 }
