@@ -1,12 +1,8 @@
 //! # mcp_io
 //!
-//! Model Context Protocol server framework: tools, resources, prompts, permission tiers, and stdio/HTTP transports.
-//!
-//! Scaffold release (v0.1.0). The public surface is designed across the 0.x
-//! series and frozen at v1.0. See `docs/API.md` and `dev/ROADMAP.md` for the
-//! current phase scope.
+//! A Model Context Protocol server framework, in development. This commit
+//! adds its JSON Schema 2020-12 validator ([`schema`]).
 
-#![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![deny(
     warnings,
@@ -27,10 +23,8 @@
     clippy::missing_safety_doc
 )]
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_scaffold_compiles_as_mcp_io() {
-        assert_eq!(env!("CARGO_PKG_NAME"), "mcp-io");
-    }
-}
+pub use rpc_io::{self, jsonx};
+
+pub mod schema;
+
+pub use schema::{Schema, SchemaError, SchemaErrorKind, SchemaLimits, ValidationError, Violations};

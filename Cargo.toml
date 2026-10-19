@@ -51,7 +51,11 @@ path = "src/lib.rs"
 # DEPENDENCIES
 # #################################
 [dependencies]
-# First-party -lang dependencies are wired at v0.2.0, when first used.
+# The owner's JSON-RPC engine: newline framing, the endpoint, correlation,
+# cancellation (MCP's spelling), progress, budgets on hostile input, and the
+# bounded output queue. Its `jsonx` re-export is the JSON this crate reads and
+# writes, so the graph holds exactly one jsonx-lib.
+rpc-io = { version = "0.4", default-features = false, features = ["std"] }
 
 
 # DEV DEPENDENCIES
