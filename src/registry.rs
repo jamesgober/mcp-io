@@ -17,7 +17,7 @@ use std::{
 use crate::{
     RegisterError, Schema, SchemaLimits, Tier, Tool, ToolCall, ToolError, ToolResult,
     jsonx::Value,
-    rpc_io::{CancelToken, Peer},
+    rpc_io::{CancelToken, Notifier, Peer},
 };
 
 /// What a registered tool runs: `Fn(&ToolCall) -> Result<ToolResult, ToolError>`.
@@ -42,9 +42,21 @@ pub(crate) struct Entry {
 struct Watcher {
     connection: u64,
     peer: Peer,
-    /// For a `subscriptions/listen` stream: its id (JSON text) and the
-    /// token the client's cancellation sets.
-    subscription: Option<(String, CancelToken)>,
+    /// For a `subscriptions/listen` stream; `None` for a legacy session.
+    subscription: Option<Stream>,
+}
+
+/// A `subscriptions/listen` stream that asked for list changes.
+#[derive(Clone)]
+pub(crate) struct Stream {
+    /// The listen request's id, as JSON text (the `subscriptionId`).
+    pub(crate) id: String,
+    /// Sends for the listen request only while it is open: rpc-io refuses
+    /// once it is answered or cancelled, under the lock its response is
+    /// written under, so no list change can follow the stream's end.
+    pub(crate) notifier: Notifier,
+    /// Set when the client cancels the stream, to forget the watcher.
+    pub(crate) token: CancelToken,
 }
 
 pub(crate) struct Registry {
@@ -194,12 +206,7 @@ impl Registry {
 
     /// Tells `peer` about changes from now on: as a legacy session's plain
     /// notification, or on the `subscriptions/listen` stream `subscription`.
-    pub(crate) fn watch(
-        &self,
-        connection: u64,
-        peer: Peer,
-        subscription: Option<(String, CancelToken)>,
-    ) {
+    pub(crate) fn watch(&self, connection: u64, peer: Peer, subscription: Option<Stream>) {
         let mut watchers = self.watchers.lock().unwrap_or_else(PoisonError::into_inner);
         // Drop the dead first, so the list holds only live streams (which
         // each connection caps) however often a client opens and cancels.
@@ -221,7 +228,7 @@ impl Registry {
 
     /// Sends `notifications/tools/list_changed` to every live watcher.
     fn changed(&self) {
-        let targets: Vec<(Peer, Option<(String, CancelToken)>)> = {
+        let targets: Vec<(Peer, Option<Stream>)> = {
             let mut watchers = self.watchers.lock().unwrap_or_else(PoisonError::into_inner);
             watchers.retain(Watcher::is_live);
             watchers
@@ -231,30 +238,26 @@ impl Registry {
         };
         for (peer, subscription) in targets {
             let sent = match subscription {
-                Some((id, token)) => {
-                    // Checked again just before sending: the stream may have
-                    // been cancelled since the snapshot. (A cancellation
-                    // racing this very send can still be overtaken; the
-                    // client ignores notifications for a stream it ended.)
-                    if token.is_cancelled() {
-                        continue;
-                    }
-                    crate::json::raw(format!(
-                        "{{\"_meta\":{{\"{}\":{id}}}}}",
-                        crate::protocol::meta::SUBSCRIPTION_ID
-                    ))
-                    .map_err(|_| ())
-                    .and_then(|params| {
-                        peer.notify("notifications/tools/list_changed", params)
-                            .map_err(|_| ())
-                    })
-                }
+                Some(stream) => crate::json::raw(format!(
+                    "{{\"_meta\":{{\"{}\":{}}}}}",
+                    crate::protocol::meta::SUBSCRIPTION_ID,
+                    stream.id
+                ))
+                .map_err(|_| ())
+                .and_then(|params| {
+                    // Refused (and nothing sent) once the stream ended.
+                    stream
+                        .notifier
+                        .notify("notifications/tools/list_changed", params)
+                        .map_err(|_| ())
+                }),
                 None => peer
                     .notify("notifications/tools/list_changed", ())
                     .map_err(|_| ()),
             };
-            // A connection that closed between the snapshot and the send has
-            // no one left to tell; it is dropped from the list next time.
+            // A connection that closed, or a stream that ended, between the
+            // snapshot and the send has no one left to tell; it is dropped
+            // from the list next time.
             let _closed = sent;
         }
     }
@@ -267,7 +270,7 @@ impl Watcher {
             && self
                 .subscription
                 .as_ref()
-                .is_none_or(|(_, token)| !token.is_cancelled())
+                .is_none_or(|stream| !stream.token.is_cancelled())
     }
 }
 
@@ -437,11 +440,24 @@ mod tests {
     #[test]
     fn test_watchers_of_ended_streams_are_dropped_when_another_starts() {
         let (tx, _rx) = std::sync::mpsc::channel::<String>();
-        let endpoint = rpc_io::Endpoint::new(tx, rpc_io::Router::<()>::new(), ());
-        let r = registry(&[]);
+        let router = rpc_io::Router::new()
+            .deferred("listen", |held: &mut Vec<rpc_io::Responder>, _, _, r| {
+                held.push(r)
+            });
+        let mut endpoint = rpc_io::Endpoint::new(tx, router, Vec::new());
         for i in 0..100 {
-            let token = CancelToken::new();
-            r.watch(1, endpoint.peer(), Some((i.to_string(), token.clone())));
+            let request = format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"listen"}}"#);
+            assert!(endpoint.handle(request.as_bytes()).is_ok());
+        }
+        let r = registry(&[]);
+        for responder in endpoint.state() {
+            let token = responder.token();
+            let stream = Stream {
+                id: responder.id().to_string(),
+                notifier: responder.notifier(),
+                token: token.clone(),
+            };
+            r.watch(1, endpoint.peer(), Some(stream));
             token.cancel();
         }
         r.watch(1, endpoint.peer(), None);

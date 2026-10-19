@@ -13,6 +13,7 @@ use crate::{
     jsonx::Value,
     pool::Pool,
     protocol::{self, Classified, Era, LEGACY_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS},
+    registry::Stream,
     rpc_io::{ErrorObject, Params, Peer, Raw, Responder, Router},
     server::{Settings, Shared},
 };
@@ -475,8 +476,10 @@ impl Session {
             Err(error) => return Err(refuse(responder, error)),
         };
         // The acknowledgment goes out before the watcher exists, so no list
-        // change can overtake it on this subscription.
-        if peer
+        // change can overtake it on this subscription; through the stream's
+        // notifier, so not at all if the stream already ended.
+        if responder
+            .notifier()
             .notify("notifications/subscriptions/acknowledged", ack)
             .is_err()
         {
@@ -484,9 +487,15 @@ impl Session {
             return Ok(());
         }
         if tools {
-            self.shared
-                .registry
-                .watch(self.connection, peer, Some((id, responder.token())));
+            self.shared.registry.watch(
+                self.connection,
+                peer,
+                Some(Stream {
+                    id,
+                    notifier: responder.notifier(),
+                    token: responder.token(),
+                }),
+            );
         }
         // The stream stays open: the request is answered only when the
         // client cancels it (no response then) or the connection ends.
