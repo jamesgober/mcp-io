@@ -5,6 +5,12 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  # New advisories against the dependency tree surface without a commit.
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,12 +22,14 @@ env:
 jobs:
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.rust }})
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, "1.85"]
+        # GitHub's stable is 1.99; 1.85 is the MSRV.
+        rust: ["1.99", "1.85"]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
@@ -35,20 +43,70 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Clippy (no default features)
-        run: cargo clippy --all-targets --no-default-features -- -D warnings
-      - name: Test (default features)
-        run: cargo test
-      - name: Test (all features)
+      - name: Test
         run: cargo test --all-features
-      - name: Test (no default features)
-        run: cargo test --no-default-features
       - name: Build examples
-        run: cargo build --examples
-      - name: Doc (all features)
+        run: cargo build --examples --all-features
+      - name: Doc
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+  i686:
+    name: 32-bit (i686-unknown-linux-gnu)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: i686-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the 32-bit C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - name: Test
+        run: cargo test --all-features --target i686-unknown-linux-gnu
+
+  fuzz:
+    name: Fuzz (smoke)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Run every target for 30 seconds
+        working-directory: fuzz
+        run: |
+          for target in server schema; do
+            # The prebuilt cargo-fuzz defaults to musl, which ASan cannot link.
+            cargo fuzz run -O --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=30 -rss_limit_mb=2048
+          done
+
+  coverage:
+    name: Coverage
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Line coverage
+        run: cargo llvm-cov --all-features --summary-only --fail-under-lines 95
 
   security:
     name: Security (audit + deny)
