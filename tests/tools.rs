@@ -625,6 +625,13 @@ fn test_typed_arguments_borrow_from_the_request() {
     // Absent arguments read as `{}`.
     let reply = client.request(&modern(5, "tools/call", r#""name":"counts""#));
     assert_eq!(text(&reply), "{}");
+    // So do `null` arguments, as the schema and `arguments()` see them.
+    let reply = client.request(&modern(
+        6,
+        "tools/call",
+        r#""name":"counts","arguments":null"#,
+    ));
+    assert_eq!(text(&reply), "{}");
 }
 
 /// A typed tool's input and output, each with its schema.

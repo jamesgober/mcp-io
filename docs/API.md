@@ -318,7 +318,7 @@ legacy session's), `client_info()` (self-reported; display only),
 `decode::<T>()` reads the arguments as any jsonx-lib `FromJson<'a>` type
 from the request's own text: a type that borrows (`&'a str`, `Cow<'a, str>`)
 borrows from the message with no copy (a string with escapes is unescaped
-into a copy). Absent arguments read as `{}`. Arguments that pass the schema
+into a copy). Absent (or `null`) arguments read as `{}`. Arguments that pass the schema
 but not `T` are a tool execution error naming the place (`/arguments/...`).
 
 `progress` does nothing when the client sent no `_meta.progressToken`. It

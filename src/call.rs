@@ -666,7 +666,7 @@ impl<'a> ToolCall<'a> {
     /// The arguments as a typed value, any jsonx-lib
     /// [`FromJson`](crate::jsonx::FromJson) type, read from the request's
     /// own text: a type that borrows (`&'a str`, `Cow<'a, str>`) borrows from
-    /// the message, with no copy. Absent arguments read as `{}`. The
+    /// the message, with no copy. Absent (or `null`) arguments read as `{}`. The
     /// arguments have passed the tool's input schema already; this is the
     /// typed view of them, under the endpoint's JSON budgets.
     ///
@@ -823,7 +823,7 @@ impl<'a> ToolCall<'a> {
 }
 
 /// The `arguments` member of a `tools/call`'s params, read as `T` straight
-/// from the reader (other members skipped; absent arguments read as `{}`).
+/// from the reader (other members skipped; absent or `null` arguments read as `{}`).
 struct ArgumentsOf<T>(T);
 
 impl<'de, T: jsonx::FromJson<'de>> jsonx::FromJson<'de> for ArgumentsOf<T> {
@@ -832,7 +832,8 @@ impl<'de, T: jsonx::FromJson<'de>> jsonx::FromJson<'de> for ArgumentsOf<T> {
         let mut object = reader.read_object()?;
         while let Some(key) = object.next_key()? {
             if key == "arguments" {
-                found = Some(object.value::<T>()?);
+                // `null` reads as absent, as the schema and `arguments()` see it.
+                found = object.value::<Option<T>>()?;
             } else {
                 object.skip()?;
             }
