@@ -31,9 +31,6 @@ const NO_PARAMS: &str = "{}";
 /// The key of the confirmation in `inputRequests` / `inputResponses`.
 const CONFIRM_KEY: &str = "confirm";
 
-/// The arguments shown in a confirmation are clipped to this many bytes.
-const SHOWN_ARGUMENTS: usize = 2048;
-
 /// One call, moved to a worker.
 pub(crate) struct Job {
     pub(crate) shared: Arc<Shared>,
@@ -229,19 +226,59 @@ fn tool_error(job: &Job, message: String) -> String {
 }
 
 /// Obtains the user's confirmation for a call, through the client.
+///
+/// The user is shown the call's arguments in full, never a part of them:
+/// their canonical JSON with every non-ASCII character escaped (so no
+/// look-alike or direction-changing character can disguise them), and the
+/// confirmation is bound to exactly that text. Arguments whose shown form
+/// would exceed `Server::with_max_confirmed_arguments` are refused instead
+/// of shortened.
 fn confirm(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> Confirmation {
-    let Ok(canonical) = crate::schema::canonical_text(arguments) else {
-        let message =
-            "Permission denied: the arguments are too deeply nested to show for confirmation";
-        return Confirmation::Stop(
+    let refuse = |message: String| {
+        Confirmation::Stop(
             Outcome::NotConfirmed,
-            Answer::Result(tool_error(job, message.to_owned())),
+            Answer::Result(tool_error(job, message)),
+        )
+    };
+    let Ok(canonical) = crate::schema::canonical_text(arguments) else {
+        return refuse(
+            "Permission denied: the arguments are too deeply nested to show for confirmation."
+                .to_owned(),
         );
     };
-    match job.era {
-        Era::Modern => confirm_modern(job, params, canonical),
-        Era::Legacy => confirm_legacy(job, &canonical),
+    let shown = shown_arguments(&canonical);
+    let limit = job.shared.settings.max_confirmed_arguments;
+    if shown.len() > limit {
+        return refuse(format!(
+            "This call needs the user's confirmation, and its arguments ({} bytes as shown) are \
+             too large to show in full (the limit is {limit} bytes); the tool was not run. \
+             Call it again with smaller arguments.",
+            shown.len()
+        ));
     }
+    match job.era {
+        Era::Modern => confirm_modern(job, params, shown),
+        Era::Legacy => confirm_legacy(job, &shown),
+    }
+}
+
+/// `canonical` (JSON text) with every non-ASCII character written as a
+/// `\uXXXX` escape: the same JSON value, in text a person can read
+/// unambiguously.
+pub(crate) fn shown_arguments(canonical: &str) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::with_capacity(canonical.len());
+    for c in canonical.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                let _infallible = write!(out, "\\u{unit:04x}");
+            }
+        }
+    }
+    out
 }
 
 /// 2026-07-28: answer with an `InputRequiredResult`, or run on a retry that
@@ -418,20 +455,16 @@ fn read_answer(response: Option<&Value<'_>>) -> Answer3 {
 }
 
 /// The question put to the user: the tool's own wording, then what will run.
-fn question(job: &Job, canonical: &str) -> String {
+/// The question put to the user: the tool's own wording, then exactly what
+/// will run (`shown`: the full arguments, see [`confirm`]).
+fn question(job: &Job, shown: &str) -> String {
     let asked = job
         .entry
         .confirmation
         .as_deref()
         .unwrap_or("Allow the tool to run?");
-    let shown = protocol::clip(canonical, SHOWN_ARGUMENTS);
-    let more = if shown.len() < canonical.len() {
-        " (shortened)"
-    } else {
-        ""
-    };
     format!(
-        "{asked}\n\nTool: {} ({} tier)\nArguments{more}: {shown}",
+        "{asked}\n\nTool: {} ({} tier)\nArguments: {shown}",
         job.entry.name, job.entry.tier
     )
 }
@@ -743,6 +776,20 @@ mod tests {
             assert!(matches!(read_answer(Some(&missing)), Answer3::Missing));
         }
         assert!(matches!(read_answer(None), Answer3::Missing));
+    }
+
+    #[test]
+    fn test_shown_arguments_escape_everything_but_ascii() {
+        assert_eq!(shown_arguments(r#"{"a":"x"}"#), r#"{"a":"x"}"#);
+        assert_eq!(
+            shown_arguments("\"caf\u{e9}\u{202e}\u{1F600}\""),
+            r#""caf\u00e9\u202e\ud83d\ude00""#
+        );
+        let shown = shown_arguments("{\"k\u{e9}\":\"v\u{1F600}\"}");
+        assert_eq!(
+            jsonx::parse(&shown).ok(),
+            jsonx::parse("{\"k\u{e9}\":\"v\u{1F600}\"}").ok()
+        );
     }
 
     #[test]

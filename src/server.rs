@@ -163,6 +163,7 @@ pub(crate) struct Settings {
     pub(crate) max_subscriptions: usize,
     pub(crate) drain_timeout: Duration,
     pub(crate) confirmation_timeout: Duration,
+    pub(crate) max_confirmed_arguments: usize,
     pub(crate) limits: Limits,
     pub(crate) max_in_flight: usize,
 }
@@ -182,6 +183,7 @@ impl Settings {
             max_subscriptions: 16,
             drain_timeout: Duration::from_secs(10),
             confirmation_timeout: Duration::from_secs(600),
+            max_confirmed_arguments: 4096,
             limits: Limits::mcp(),
             max_in_flight: 1024,
         }
@@ -570,6 +572,17 @@ impl Server {
     pub fn with_confirmation_timeout(mut self, timeout: Duration) -> Self {
         self.settings.confirmation_timeout = timeout;
         self.ledger = Arc::new(Ledger::new(self.ledger_capacity, timeout));
+        self
+    }
+
+    /// The largest arguments, in bytes as shown to the user, a call that
+    /// needs confirmation may have (default 4 KiB). The user always sees a
+    /// call's arguments in full (canonical JSON, non-ASCII escaped); a call
+    /// whose arguments would not fit is refused with a tool error rather
+    /// than shown in part.
+    #[must_use]
+    pub fn with_max_confirmed_arguments(mut self, bytes: usize) -> Self {
+        self.settings.max_confirmed_arguments = bytes;
         self
     }
 

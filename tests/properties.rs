@@ -206,4 +206,36 @@ proptest! {
         answered.sort_unstable();
         prop_assert_eq!(answered, expected.into_iter().collect::<Vec<_>>());
     }
+
+    #[test]
+    fn test_a_confirmation_shows_every_argument_or_refuses(
+        members in prop::collection::btree_map("[a-z]{1,8}", "[ -~]{0,300}", 1..8),
+    ) {
+        let server = Server::new(Implementation::new("p", "1"))
+            .with_workers(0)
+            .with_max_confirmed_arguments(512)
+            .tool(Tool::new("ship", Tier::Publish).input_schema(json!({ "type": "object" })), |_| Ok(ToolResult::new()))
+            .unwrap();
+        let mut client = Client::new(&server);
+        let object: mcp_io::jsonx::Object<'_> = members.iter().map(|(k, v)| (k.clone(), Value::from(v.clone()))).collect();
+        let arguments = Value::Object(object);
+        let reply = client.request(&format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{"elicitation":{{}}}}}},"name":"ship","arguments":{arguments}}}}}"#
+        ));
+        let result = &reply["result"];
+        if result["resultType"] == "input_required" {
+            // Asked: the question holds the arguments, whole and parseable.
+            let message = result["inputRequests"]["confirm"]["params"]["message"].as_str().unwrap();
+            let shown = message.rsplit_once("Arguments: ").map(|(_, a)| a).unwrap();
+            let shown = mcp_io::jsonx::parse(shown).unwrap();
+            for (key, value) in &members {
+                prop_assert_eq!(shown[key.as_str()].as_str(), Some(value.as_str()));
+            }
+            prop_assert_eq!(shown.as_object().map(|o| o.len()), Some(members.len()));
+        } else {
+            // Not asked: refused, as too large to show.
+            prop_assert_eq!(result["isError"].as_bool(), Some(true));
+            prop_assert!(arguments.to_string().len() > 400);
+        }
+    }
 }

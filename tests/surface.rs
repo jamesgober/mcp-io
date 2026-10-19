@@ -118,24 +118,59 @@ fn test_tool_call_accessors() {
 }
 
 #[test]
-fn test_long_arguments_are_shortened_in_the_confirmation() {
+fn test_confirmations_show_the_arguments_in_full_or_refuse() {
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&ran);
     let server = Server::new(Implementation::new("n", "1"))
         .with_workers(0)
+        .with_max_confirmed_arguments(200)
         .tool(
             Tool::new("ship", Tier::Publish).input_schema(json!({ "type": "object" })),
-            |_| Ok(ToolResult::new()),
+            move |call| {
+                log.lock().unwrap().push(call.arguments().to_string());
+                Ok(ToolResult::new())
+            },
         )
         .unwrap();
     let mut client = Client::new(&server);
-    let long = "x".repeat(5000);
-    let reply = client.request(&format!(
-        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{"elicitation":{{}}}}}},"name":"ship","arguments":{{"note":"{long}"}}}}}}"#
-    ));
+    let ask = |client: &mut Client, id: u64, arguments: &str| {
+        client.request(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{"elicitation":{{}}}}}},"name":"ship","arguments":{arguments}}}}}"#
+        ))
+    };
+    // The verifier's probe: padding under a key that sorts first used to push
+    // the decisive argument out of the question. Now the call is refused.
+    let pad = "x".repeat(3000);
+    let reply = ask(
+        &mut client,
+        1,
+        &format!(r#"{{"aaa_note":"{pad}","target":"PRODUCTION"}}"#),
+    );
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(
+        text(&reply).contains("too large to show in full"),
+        "{}",
+        text(&reply)
+    );
+    assert!(reply["result"].get("requestState").is_none());
+    // Small enough: every byte is shown, non-ASCII escaped.
+    let reply = ask(
+        &mut client,
+        2,
+        r#"{"target":"PRODUCTION","note":"caf\u00e9 \u202e"}"#,
+    );
     let message = reply["result"]["inputRequests"]["confirm"]["params"]["message"]
         .as_str()
         .unwrap();
-    assert!(message.contains("Arguments (shortened): "));
-    assert!(message.len() < 2300);
+    assert!(
+        message.ends_with(r#"Arguments: {"note":"caf\u00e9 \u202e","target":"PRODUCTION"}"#),
+        "{message}"
+    );
+    assert!(
+        message.is_ascii(),
+        "nothing in the arguments can disguise itself"
+    );
+    assert!(ran.lock().unwrap().is_empty());
 }
 
 #[test]

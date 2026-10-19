@@ -8,7 +8,10 @@
 //!    or [`Decision::Confirm`].
 //! 2. A `Publish` tool is never allowed outright: `Allow` is treated as
 //!    `Confirm`. No policy, setting, or earlier approval can skip it.
-//! 3. `Confirm` asks the user through the client, with MCP's own mechanism:
+//! 3. `Confirm` asks the user through the client, with MCP's own mechanism.
+//!    The question shows the call's arguments in full (canonical JSON,
+//!    non-ASCII escaped), never a part of them; a call too large to show is
+//!    refused. Then:
 //!    on 2026-07-28, the call is answered with an `InputRequiredResult`
 //!    carrying a form-mode `elicitation/create` request and a single-use
 //!    `requestState`, and the tool runs only when the client retries the call

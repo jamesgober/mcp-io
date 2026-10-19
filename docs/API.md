@@ -140,6 +140,7 @@ unless the host replaces the hook.
 | `with_max_subscriptions(self, n)` | Open `subscriptions/listen` streams per connection (default 16). |
 | `with_drain_timeout(self, Duration)` | How long the end of input waits for running calls (default 10 s). |
 | `with_confirmation_timeout(self, Duration)` | A `requestState`'s life, and a legacy elicitation's wait (default 10 min). |
+| `with_max_confirmed_arguments(self, bytes)` | The largest arguments, as shown, a confirm-tier call may have (default 4 KiB); larger calls are refused, never shown in part. |
 | `with_max_pending_confirmations(self, n)` | Outstanding confirmations kept per connection (default 64; the connection's oldest is forgotten). |
 | `with_limits(self, rpc_io::Limits)` | Message budgets (default `Limits::mcp()`; batches stay off). |
 | `with_schema_limits(self, SchemaLimits)` | Budgets for schemas registered from now on. |
@@ -402,8 +403,11 @@ panicking policy denies.
 `Confirm` asks the user through the client. On 2026-07-28 the call is
 answered with `resultType: "input_required"`, an `inputRequests.confirm`
 holding a form `elicitation/create` (the tool's `confirmation` question, the
-tool, its tier, and the canonical arguments, clipped to 2 KiB), and a
-`requestState`. The server keeps only a keyed digest of the arguments, so a
+tool, its tier, and the arguments in full: canonical JSON with every
+non-ASCII character escaped), and a `requestState` bound to exactly that
+text. The user is never shown part of the arguments: a call whose shown
+arguments exceed `Server::with_max_confirmed_arguments` (4 KiB) is refused
+with a tool error instead. The server keeps only a keyed digest of the arguments, so a
 pending confirmation costs the same whatever their size; each connection may
 hold `with_max_pending_confirmations` (64) of them, its oldest forgotten
 first. The client retries the call (a new id, the same name and
