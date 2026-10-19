@@ -365,7 +365,10 @@ impl Tool {
     /// legacy session (`legacy`), an output schema whose root is not
     /// `"type": "object"` is left out: 2025-11-25 and 2025-06-18 allow only
     /// object output schemas (and object structured content, which the
-    /// result writer then sends as text only).
+    /// result writer then sends as text only). Their schemas also require
+    /// every member of the root `properties` to be an object, so a boolean
+    /// one is written in its object form, with the same meaning: `true` as
+    /// `{}`, `false` as `{"not": {}}`.
     pub(crate) fn definition_json(&self, legacy: bool) -> String {
         let mut o = Obj::with_capacity(256);
         let _ = o
@@ -373,6 +376,9 @@ impl Tool {
             .opt_str("title", self.title.as_deref())
             .opt_str("description", self.description.as_deref());
         match &self.input_schema {
+            Some(schema) if legacy => {
+                let _ = o.value("inputSchema", &legacy_schema(schema));
+            }
             Some(schema) => {
                 let _ = o.value("inputSchema", schema);
             }
@@ -381,8 +387,10 @@ impl Tool {
             }
         }
         if let Some(schema) = &self.output_schema {
-            if !legacy || is_object_schema(schema) {
+            if !legacy {
                 let _ = o.value("outputSchema", schema);
+            } else if is_object_schema(schema) {
+                let _ = o.value("outputSchema", &legacy_schema(schema));
             }
         }
         let annotations = self.annotations_json();
@@ -417,6 +425,27 @@ pub trait JsonSchema {
     /// The schema (JSON Schema 2020-12, within the supported subset: see
     /// [`schema`](crate::schema)).
     fn json_schema() -> Value<'static>;
+}
+
+/// `schema` as the 2025 revisions accept it: each boolean member of the
+/// root `properties` in its object form (`true` as `{}`, `false` as
+/// `{"not": {}}`), which accepts and refuses exactly the same values.
+fn legacy_schema(schema: &Value<'static>) -> Value<'static> {
+    let mut schema = schema.clone();
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for (_, member) in properties.iter_mut() {
+            match member {
+                Value::Bool(true) => *member = Value::Object(crate::jsonx::Object::new()),
+                Value::Bool(false) => {
+                    let mut never = crate::jsonx::Object::new();
+                    never.push("not", Value::Object(crate::jsonx::Object::new()));
+                    *member = Value::Object(never);
+                }
+                _ => {}
+            }
+        }
+    }
+    schema
 }
 
 /// Whether `schema`'s root is `"type": "object"`.

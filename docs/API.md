@@ -358,6 +358,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `structured_content()`, `is_error()`. Structured content without other
 content gets a text copy when sent. With an output schema, a successful
 result must carry structured content that matches it (else `-32603`).
+A legacy session (2025-11-25, 2025-06-18) is sent only what its revision
+allows: no output schema whose root is not `"type": "object"`, no
+structured content that is not an object (the text copy stands alone), and
+boolean members of a schema's root `properties` in their object form
+(`true` as `{}`, `false` as `{"not": {}}`, the same meaning).
 
 `Content` (`#[non_exhaustive]`): `Text`, `Image`, `Audio` (base64 data and a
 MIME type), `ResourceLink`, `Resource` (embedded `ResourceContents::Text` or

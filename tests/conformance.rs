@@ -319,6 +319,17 @@ fn output_shapes() -> Server {
             |_| Ok(ToolResult::structured(json!({ "a": 1 }))),
         )
         .unwrap()
+        // Boolean property subschemas: 2020-12 allows them; the legacy
+        // revisions require object ones.
+        .tool(
+            Tool::new("flags", Tier::ReadOnly)
+                .input_schema(json!({ "type": "object", "properties": { "x": true, "y": false } }))
+                .output_schema(
+                    json!({ "type": "object", "properties": { "ok": true, "no": false } }),
+                ),
+            |_| Ok(ToolResult::structured(json!({ "ok": 1 }))),
+        )
+        .unwrap()
 }
 
 #[test]
@@ -350,6 +361,26 @@ fn test_non_object_outputs_conform_on_every_revision() {
         assert_eq!(count.get("outputSchema").is_some(), modern, "{revision}");
         let pair = tools.iter().find(|t| t["name"] == "pair").unwrap();
         assert!(pair.get("outputSchema").is_some(), "{revision}");
+        // A legacy session gets boolean property subschemas in their object
+        // form, with the same meaning; 2026-07-28 gets them as written.
+        let flags = tools.iter().find(|t| t["name"] == "flags").unwrap();
+        let (yes, no) = if modern {
+            ("true", "false")
+        } else {
+            ("{}", r#"{"not":{}}"#)
+        };
+        let input = &flags["inputSchema"]["properties"];
+        assert_eq!(
+            (input["x"].to_string(), input["y"].to_string()),
+            (yes.to_owned(), no.to_owned()),
+            "{revision}"
+        );
+        let output = &flags["outputSchema"]["properties"];
+        assert_eq!(
+            (output["ok"].to_string(), output["no"].to_string()),
+            (yes.to_owned(), no.to_owned()),
+            "{revision}"
+        );
         if modern {
             assert_conforms(revision, "ListToolsResultResponse", &reply);
         } else {
@@ -359,11 +390,12 @@ fn test_non_object_outputs_conform_on_every_revision() {
             (2, "count", "5"),
             (3, "list", r#"["a","b"]"#),
             (4, "pair", r#"{"a":1}"#),
+            (5, "flags", r#"{"ok":1}"#),
         ] {
             let reply = client.request(&request(id, "tools/call", &format!(r#""name":"{tool}""#)));
             let result = &reply["result"];
             let sent = result.get("structuredContent").map(ToString::to_string);
-            if modern || tool == "pair" {
+            if modern || tool == "pair" || tool == "flags" {
                 assert_eq!(sent.as_deref(), Some(structured), "{revision} {tool}");
             } else {
                 assert_eq!(
@@ -382,6 +414,13 @@ fn test_non_object_outputs_conform_on_every_revision() {
                 assert_conforms(revision, "CallToolResult", result);
             }
         }
+        // The schema still means what it said: `y` is never allowed.
+        let reply = client.request(&request(
+            6,
+            "tools/call",
+            r#""name":"flags","arguments":{"x":1,"y":1}"#,
+        ));
+        assert_eq!(reply["result"]["isError"], true, "{revision}");
         for text in &client.log {
             assert_conforms(revision, "JSONRPCMessage", &jsonx::parse(text).unwrap());
         }
