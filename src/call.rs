@@ -25,6 +25,11 @@ use crate::{
     server::Shared,
 };
 
+/// A validation report sent to the client is clipped to this many bytes.
+/// (Each error is short already: property names in it are clipped to 64
+/// bytes and paths to 512.)
+const REPORT_CLIP: usize = 8192;
+
 /// The `params` of a call that sent none.
 const NO_PARAMS: &str = "{}";
 
@@ -125,8 +130,15 @@ fn execute(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> (Outcome, An
         return (Outcome::Cancelled, Answer::Nothing);
     }
     if let Err(violations) = job.entry.input.validate(arguments) {
+        let report = violations.to_string();
+        let shown = protocol::clip(&report, REPORT_CLIP);
+        let more = if shown.len() < report.len() {
+            " (shortened)"
+        } else {
+            ""
+        };
         let message = format!(
-            "Invalid arguments for the tool `{}`: {violations}",
+            "Invalid arguments for the tool `{}`: {shown}{more}",
             job.entry.name
         );
         return (

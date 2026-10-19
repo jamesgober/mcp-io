@@ -109,7 +109,11 @@ impl<'s> Run<'s> {
             return;
         }
         self.errors.push(ValidationError {
-            instance_path: self.path.clone(),
+            instance_path: if self.path.len() > PATH_CLIP {
+                format!("{}\u{2026}", crate::protocol::clip(&self.path, PATH_CLIP))
+            } else {
+                self.path.clone()
+            },
             keyword,
             message: message.into(),
         });
@@ -606,16 +610,37 @@ impl<'s> Run<'s> {
     }
 }
 
+/// Property names in error messages and paths are clipped to this many
+/// bytes (and marked with `…`): they come from the client, and an error
+/// must not echo a megabyte key back.
+pub(crate) const NAME_CLIP: usize = 64;
+
+/// An instance path in an error is clipped to this many bytes.
+pub(crate) const PATH_CLIP: usize = 512;
+
+/// `name`, clipped to [`NAME_CLIP`] bytes with a `…` mark when longer.
+fn clipped(name: &str) -> Cow<'_, str> {
+    let short = crate::protocol::clip(name, NAME_CLIP);
+    if short.len() == name.len() {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(format!("{short}\u{2026}"))
+    }
+}
+
+/// `name` as a JSON string, clipped (see [`clipped`]).
 fn quoted(name: &str) -> String {
+    let name = clipped(name);
     let mut out = String::with_capacity(name.len() + 2);
-    crate::jsonx::write_string(&mut out, name);
+    crate::jsonx::write_string(&mut out, &name);
     out
 }
 
-/// Appends one JSON Pointer token (RFC 6901 escaping) to the path.
+/// Appends one JSON Pointer token (RFC 6901 escaping) to the path, the key
+/// clipped (see [`clipped`]).
 fn push_key(path: &mut String, key: &str) {
     path.push('/');
-    for c in key.chars() {
+    for c in clipped(key).chars() {
         match c {
             '~' => path.push_str("~0"),
             '/' => path.push_str("~1"),

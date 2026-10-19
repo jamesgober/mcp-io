@@ -740,3 +740,35 @@ fn test_typed_tools_decode_arguments_and_encode_results() {
     );
     assert!(text(&reply).contains("/arguments/k/0"), "{}", text(&reply));
 }
+
+#[test]
+fn test_validation_errors_clip_client_property_names() {
+    let required: Vec<mcp_io::jsonx::Value<'static>> =
+        (0..16).map(|i| format!("r{i}").into()).collect();
+    let server = base()
+        .with_workers(0)
+        .tool(
+            Tool::new("strict", Tier::ReadOnly).input_schema(json!({
+                "type": "object",
+                "additionalProperties": { "type": "object", "required": required },
+                "propertyNames": { "maxLength": 8 }
+            })),
+            |_| Ok(ToolResult::new()),
+        )
+        .unwrap();
+    let mut client = Client::new(&server);
+    for size in [64 << 10, 1 << 20] {
+        let key = "k".repeat(size);
+        let request = call(1, "strict", &format!(r#"{{"{key}":{{}}}}"#));
+        let reply = client.request(&request);
+        // A tool error the model can read, not an internal error, and no
+        // echo of the key: the reply is small whatever the key's size.
+        assert_eq!(reply["result"]["isError"], true, "{size}");
+        let sent = client.log.last().unwrap().len();
+        assert!(sent < 10_000, "a {size}-byte key made a {sent}-byte reply");
+        assert!(
+            text(&reply).contains('\u{2026}'),
+            "clipped names are marked"
+        );
+    }
+}

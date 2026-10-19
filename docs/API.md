@@ -535,7 +535,10 @@ one is refused (keyword `number`) wherever its value matters (`enum`,
 `UnsupportedDialect`, `DuplicateAnchor`, `NonLocalRef`, `UnresolvedRef`,
 `TooDeep`, `TooLarge`. `Violations`: `errors()`, `truncated()`,
 `budget_exceeded()`; `ValidationError`: `instance_path()` (JSON Pointer),
-`keyword()`, `message()` (never quotes instance values).
+`keyword()`, `message()` (never quotes instance values). Paths and messages
+name properties, and a property name from the instance is clipped to 64
+bytes, marked `…`; a path is clipped to 512 bytes. A `tools/call` report
+sent to the client is clipped to 8 KiB.
 
 ```rust
 use mcp_io::{Schema, SchemaErrorKind, jsonx::{json, parse}};

@@ -289,7 +289,9 @@ impl Schema {
     ///
     /// [`Violations`]: up to [`SchemaLimits::max_errors`] errors, each with
     /// the instance location (a JSON Pointer), the keyword that failed, and
-    /// a message that does not quote the instance's values. When the
+    /// a message that does not quote the instance's values (property names
+    /// appear, clipped to 64 bytes and marked `…`; a path is clipped to 512
+    /// bytes). When the
     /// validation budget runs out, a single error with
     /// [`Violations::budget_exceeded`] set.
     ///
@@ -506,6 +508,8 @@ pub struct ValidationError {
 
 impl ValidationError {
     /// Where in the instance, as a JSON Pointer (`""` is the whole instance).
+    /// Each property name in it is clipped to 64 bytes (marked `…`), and the
+    /// whole path to 512 bytes, so a long key from the client is not echoed.
     #[must_use]
     pub fn instance_path(&self) -> &str {
         &self.instance_path
@@ -518,7 +522,8 @@ impl ValidationError {
     }
 
     /// What is wrong, without quoting the instance's values (which may be
-    /// sensitive); property names the schema requires are quoted.
+    /// sensitive). Property names are quoted (the schema's, and for
+    /// `propertyNames` the instance's, clipped to 64 bytes and marked `…`).
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message

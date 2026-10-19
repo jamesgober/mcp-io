@@ -555,3 +555,30 @@ fn test_canonical_text_is_charged_to_the_step_budget() {
     }
     assert!(s.validate(&deep).unwrap_err().budget_exceeded());
 }
+
+#[test]
+fn test_error_paths_and_names_from_the_instance_are_clipped() {
+    let s = schema(json!({ "additionalProperties": false, "propertyNames": { "maxLength": 3 } }));
+    let key = "k".repeat(1000);
+    let mut object = crate::jsonx::Object::new();
+    object.push(key.clone(), json!(1));
+    let errors = s.validate(&Value::Object(object)).unwrap_err();
+    for error in errors.errors() {
+        assert!(
+            error.instance_path().len() <= validate::NAME_CLIP + 4,
+            "{}",
+            error.instance_path().len()
+        );
+        assert!(error.message().len() < 200, "{}", error.message().len());
+    }
+    let mut deep = json!(1);
+    for _ in 0..200 {
+        let mut o = crate::jsonx::Object::new();
+        o.push("k".repeat(60), deep);
+        deep = Value::Object(o);
+    }
+    let errors = schema(json!({ "additionalProperties": { "$ref": "#" }, "type": "object" }))
+        .validate(&deep)
+        .unwrap_err();
+    assert!(errors.errors()[0].instance_path().len() <= validate::PATH_CLIP + 4);
+}
