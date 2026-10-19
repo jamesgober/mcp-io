@@ -626,3 +626,117 @@ fn test_typed_arguments_borrow_from_the_request() {
     let reply = client.request(&modern(5, "tools/call", r#""name":"counts""#));
     assert_eq!(text(&reply), "{}");
 }
+
+/// A typed tool's input and output, each with its schema.
+struct Pair {
+    a: i64,
+    b: i64,
+}
+
+struct Total {
+    total: i64,
+}
+
+impl<'de> mcp_io::jsonx::FromJson<'de> for Pair {
+    fn from_json(
+        reader: &mut mcp_io::jsonx::Reader<'de>,
+    ) -> Result<Self, mcp_io::jsonx::DecodeError> {
+        let (mut a, mut b) = (None, None);
+        let mut object = reader.read_object()?;
+        while let Some(key) = object.next_key()? {
+            match &*key {
+                "a" => object.field(&mut a)?,
+                "b" => object.field(&mut b)?,
+                _ => object.skip()?,
+            }
+        }
+        Ok(Pair {
+            a: object.required(a, "a")?,
+            b: object.required(b, "b")?,
+        })
+    }
+}
+
+impl mcp_io::JsonSchema for Pair {
+    fn json_schema() -> mcp_io::jsonx::Value<'static> {
+        json!({
+            "type": "object",
+            "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } },
+            "required": ["a", "b"],
+            "additionalProperties": false
+        })
+    }
+}
+
+impl mcp_io::jsonx::ToJson for Total {
+    fn to_json(&self, out: mcp_io::jsonx::ValueWriter<'_>) -> mcp_io::jsonx::Written {
+        out.object(|o| o.member("total", &self.total))
+    }
+}
+
+impl mcp_io::JsonSchema for Total {
+    fn json_schema() -> mcp_io::jsonx::Value<'static> {
+        json!({ "type": "object", "properties": { "total": { "type": "integer" } }, "required": ["total"] })
+    }
+}
+
+#[test]
+fn test_typed_tools_decode_arguments_and_encode_results() {
+    let server = base()
+        .with_workers(0)
+        .tool_json(
+            Tool::new("total", Tier::ReadOnly)
+                .input_schema_for::<Pair>()
+                .output_schema_for::<Total>(),
+            |_, Pair { a, b }| {
+                a.checked_add(b)
+                    .map(|total| Total { total })
+                    .ok_or_else(|| ToolError::new("the total overflows"))
+            },
+        )
+        .unwrap();
+    server
+        .tools()
+        .add_json(
+            Tool::new("echo_list", Tier::ReadOnly).input_schema(json!({ "type": "object" })),
+            |_, words: std::collections::BTreeMap<String, Vec<String>>| Ok(words),
+        )
+        .unwrap();
+    let mut client = Client::new(&server);
+    let reply = client.request(&modern(1, "tools/list", ""));
+    assert_eq!(
+        reply["result"]["tools"][1]["inputSchema"]["required"].to_string(),
+        r#"["a","b"]"#
+    );
+    assert_eq!(
+        reply["result"]["tools"][1]["outputSchema"]["required"].to_string(),
+        r#"["total"]"#
+    );
+    let reply = client.request(&call(2, "total", r#"{"a":40,"b":2}"#));
+    assert_eq!(
+        reply["result"]["structuredContent"].to_string(),
+        r#"{"total":42}"#
+    );
+    assert_eq!(text(&reply), r#"{"total":42}"#);
+    let reply = client.request(&call(3, "total", r#"{"a":9223372036854775807,"b":1}"#));
+    assert_eq!(
+        (reply["result"]["isError"].as_bool(), text(&reply)),
+        (Some(true), "the total overflows".to_owned())
+    );
+    let reply = client.request(&call(4, "total", r#"{"a":"x","b":1}"#));
+    assert_eq!(
+        reply["result"]["isError"], true,
+        "the schema refuses it first"
+    );
+    let reply = client.request(&call(5, "echo_list", r#"{"k":["a","b"]}"#));
+    assert_eq!(
+        reply["result"]["structuredContent"].to_string(),
+        r#"{"k":["a","b"]}"#
+    );
+    let reply = client.request(&call(6, "echo_list", r#"{"k":[1]}"#));
+    assert_eq!(
+        reply["result"]["isError"], true,
+        "fits the schema, not the type"
+    );
+    assert!(text(&reply).contains("/arguments/k/0"), "{}", text(&reply));
+}

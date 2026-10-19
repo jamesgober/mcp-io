@@ -323,6 +323,27 @@ impl Tools {
         self.0.add(tool, Arc::new(handler))
     }
 
+    /// Registers a typed tool: its arguments are decoded into `A` (after the
+    /// input schema has passed them), and the handler's `R` becomes the
+    /// result's structured content, with a text copy. See
+    /// [`Server::tool_json`](crate::Server::tool_json).
+    ///
+    /// # Errors
+    ///
+    /// As [`add`](Self::add).
+    ///
+    /// # Examples
+    ///
+    /// See [`Server::tool_json`](crate::Server::tool_json).
+    pub fn add_json<A, R, F>(&self, tool: Tool, handler: F) -> Result<(), RegisterError>
+    where
+        A: for<'de> crate::jsonx::FromJson<'de>,
+        R: crate::jsonx::ToJson,
+        F: Fn(&ToolCall<'_>, A) -> Result<R, ToolError> + Send + Sync + 'static,
+    {
+        self.0.add(tool, typed(handler))
+    }
+
     /// Removes the tool named `name`; `false` if there was none. Calls
     /// already running finish.
     ///
@@ -363,6 +384,19 @@ impl Tools {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Wraps a typed handler: decode the arguments, run, encode the result.
+pub(crate) fn typed<A, R, F>(handler: F) -> Handler
+where
+    A: for<'de> crate::jsonx::FromJson<'de>,
+    R: crate::jsonx::ToJson,
+    F: Fn(&ToolCall<'_>, A) -> Result<R, ToolError> + Send + Sync + 'static,
+{
+    Arc::new(move |call: &ToolCall<'_>| {
+        let arguments = call.decode::<A>()?;
+        handler(call, arguments).map(|result| ToolResult::encode(&result))
+    })
 }
 
 impl core::fmt::Debug for Tools {

@@ -204,6 +204,27 @@ impl Tool {
         self
     }
 
+    /// Sets the input schema to `T`'s ([`JsonSchema`]), so a typed tool's
+    /// schema and decoder are defined in one place.
+    ///
+    /// # Examples
+    ///
+    /// See [`Server::tool_json`](crate::Server::tool_json).
+    #[must_use]
+    pub fn input_schema_for<T: JsonSchema + ?Sized>(self) -> Self {
+        self.input_schema(T::json_schema())
+    }
+
+    /// Sets the output schema to `T`'s ([`JsonSchema`]).
+    ///
+    /// # Examples
+    ///
+    /// See [`Server::tool_json`](crate::Server::tool_json).
+    #[must_use]
+    pub fn output_schema_for<T: JsonSchema + ?Sized>(self) -> Self {
+        self.output_schema(T::json_schema())
+    }
+
     /// The `idempotentHint` annotation: repeating a call with the same
     /// arguments has no further effect. Sent for tiers above `ReadOnly`.
     ///
@@ -366,6 +387,34 @@ impl Tool {
         let _ = o.raw("annotations", &annotations);
         o.finish()
     }
+}
+
+/// A type's JSON Schema, written next to its `FromJson` or `ToJson` impl so
+/// one definition describes both what the tool accepts and what it decodes
+/// ([`Tool::input_schema_for`], [`Tool::output_schema_for`]). The schema is
+/// still what validates a call before its handler runs; the decoder then
+/// reads the validated arguments.
+///
+/// # Examples
+///
+/// ```
+/// use mcp_io::{JsonSchema, Tier, Tool, jsonx::{json, Value}};
+///
+/// struct Query;
+///
+/// impl JsonSchema for Query {
+///     fn json_schema() -> Value<'static> {
+///         json!({ "type": "object", "properties": { "q": { "type": "string" } }, "required": ["q"] })
+///     }
+/// }
+///
+/// let tool = Tool::new("find", Tier::ReadOnly).input_schema_for::<Query>();
+/// assert_eq!(tool.input_schema_value(), Some(&Query::json_schema()));
+/// ```
+pub trait JsonSchema {
+    /// The schema (JSON Schema 2020-12, within the supported subset: see
+    /// [`schema`](crate::schema)).
+    fn json_schema() -> Value<'static>;
 }
 
 /// The input schema of a tool that takes no arguments, as MCP recommends.

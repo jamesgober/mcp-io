@@ -126,7 +126,7 @@ pub use registry::Tools;
 pub use schema::{Schema, SchemaError, SchemaErrorKind, SchemaLimits, ValidationError, Violations};
 pub use server::{CacheScope, Connection, Implementation, Server};
 pub use session::Lifecycle;
-pub use tool::{Tier, Tool};
+pub use tool::{JsonSchema, Tier, Tool};
 
 /// Compiles and runs the `rust` code blocks in `README.md` and `docs/API.md`
 /// as part of `cargo test`, so the published examples cannot drift from the

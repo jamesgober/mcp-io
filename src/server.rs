@@ -346,6 +346,88 @@ impl Server {
         Ok(self)
     }
 
+    /// Registers a typed tool. `A` is decoded from the call's arguments
+    /// (after they pass the tool's input schema, which
+    /// [`Tool::input_schema_for`](crate::Tool::input_schema_for) can take
+    /// from `A`), and the handler's `R` is sent as structured content with a
+    /// text copy, checked against the output schema if the tool has one.
+    /// Arguments that fit the schema but not `A` are a tool execution error.
+    ///
+    /// `A` owns its data here. For arguments that borrow from the request
+    /// (`&str`, `Cow<str>`) with no copy, register with [`tool`](Self::tool)
+    /// and call [`ToolCall::decode`] in the handler.
+    ///
+    /// # Errors
+    ///
+    /// [`RegisterError`], as [`Tools::add`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcp_io::{Implementation, JsonSchema, Server, Tier, Tool, jsonx::{self, json, Value}};
+    ///
+    /// struct Add { a: i64, b: i64 }
+    /// struct Sum { sum: i64 }
+    ///
+    /// impl<'de> jsonx::FromJson<'de> for Add {
+    ///     fn from_json(reader: &mut jsonx::Reader<'de>) -> Result<Self, jsonx::DecodeError> {
+    ///         let (mut a, mut b) = (None, None);
+    ///         let mut object = reader.read_object()?;
+    ///         while let Some(key) = object.next_key()? {
+    ///             match &*key {
+    ///                 "a" => object.field(&mut a)?,
+    ///                 "b" => object.field(&mut b)?,
+    ///                 _ => object.skip()?,
+    ///             }
+    ///         }
+    ///         Ok(Add { a: object.required(a, "a")?, b: object.required(b, "b")? })
+    ///     }
+    /// }
+    ///
+    /// // The schema lives next to the decoder: one definition of the input.
+    /// impl JsonSchema for Add {
+    ///     fn json_schema() -> Value<'static> {
+    ///         json!({
+    ///             "type": "object",
+    ///             "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } },
+    ///             "required": ["a", "b"],
+    ///             "additionalProperties": false
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// impl jsonx::ToJson for Sum {
+    ///     fn to_json(&self, out: jsonx::ValueWriter<'_>) -> jsonx::Written {
+    ///         out.object(|o| o.member("sum", &self.sum))
+    ///     }
+    /// }
+    ///
+    /// let server = Server::new(Implementation::new("adder", "1.0.0")).tool_json(
+    ///     Tool::new("add", Tier::ReadOnly).input_schema_for::<Add>(),
+    ///     |_, Add { a, b }| {
+    ///         let sum = a.checked_add(b).ok_or_else(|| mcp_io::ToolError::new("the sum overflows 64 bits"))?;
+    ///         Ok(Sum { sum })
+    ///     },
+    /// )?;
+    /// let (tx, rx) = std::sync::mpsc::channel::<String>();
+    /// let mut connection = server.connect(tx)?; // kept open while the call runs
+    /// connection.handle(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{
+    ///     "io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},
+    ///     "name":"add","arguments":{"a":2,"b":40}}}"#)?;
+    /// assert!(server.tools().contains("add"));
+    /// assert!(rx.recv_timeout(std::time::Duration::from_secs(10))?.contains(r#""structuredContent":{"sum":42}"#));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn tool_json<A, R, F>(self, tool: Tool, handler: F) -> Result<Self, RegisterError>
+    where
+        A: for<'de> crate::jsonx::FromJson<'de>,
+        R: crate::jsonx::ToJson,
+        F: Fn(&ToolCall<'_>, A) -> Result<R, ToolError> + Send + Sync + 'static,
+    {
+        self.registry.add(tool, crate::registry::typed(handler))?;
+        Ok(self)
+    }
+
     /// The tool set, to change while serving. Connections see changes at
     /// once.
     ///
