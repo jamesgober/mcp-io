@@ -87,9 +87,27 @@ fn bench_list(c: &mut Criterion) {
         let mut connection = server.connect(tx).unwrap();
         let first =
             format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{{{META}}}}}"#);
+        // Cursors are the server's own (a forged one is refused), so page
+        // to the middle of the registry for one.
+        let mut cursor = String::new();
+        let mut seen = 0;
+        while seen < tools / 2 {
+            let request = if cursor.is_empty() {
+                first.clone()
+            } else {
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{{{META},"cursor":{}}}}}"#,
+                    jsonx::Value::from(cursor.as_str())
+                )
+            };
+            connection.handle(request.as_bytes()).unwrap();
+            let reply = jsonx::parse(&rx.recv().unwrap()).unwrap().into_owned();
+            seen += reply["result"]["tools"].as_array().unwrap().len();
+            cursor = reply["result"]["nextCursor"].as_str().unwrap().to_owned();
+        }
         let middle = format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{{{META},"cursor":"after:tool_{:06}"}}}}"#,
-            tools / 2
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{{{META},"cursor":{}}}}}"#,
+            jsonx::Value::from(cursor.as_str())
         );
         let _ = group.bench_function(BenchmarkId::new("first_page_of_100", tools), |b| {
             b.iter(|| {

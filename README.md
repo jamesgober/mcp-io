@@ -126,14 +126,14 @@ What the gate guarantees, and what it does not: a model cannot run a tool the po
 
 ## Performance
 
-`cargo bench --bench bench`, measured on a Windows development machine under background load (criterion's 95% intervals; expect other machines to differ):
+`cargo bench --bench bench`, measured on a Windows development machine under background load (the span of criterion's 95% intervals over two runs; expect other machines to differ):
 
 | Benchmark | Time |
 |---|---|
-| Validate typical tool arguments (a 5-property schema with an enum, bounds, and a unique-items array) | 0.53 to 0.59 µs |
-| `uniqueItems` over 1,000 / 100,000 strings | 77 to 82 µs / 13 to 15 ms |
-| One `tools/list` page of 100 tools, from a registry of 1,000 or of 100,000 | 133 to 149 µs (the same for both sizes) |
-| A whole `tools/call` through a connection (parse, validate, gate, handler, result), inline, with 1 or 100,000 tools registered | 4.4 to 5.7 µs |
+| Validate typical tool arguments (a 5-property schema with an enum, bounds, and a unique-items array) | 0.54 to 0.64 µs |
+| `uniqueItems` over 1,000 / 100,000 strings | 73 to 83 µs / 11 to 18 ms |
+| One `tools/list` page of 100 tools (the first, or one from the middle by its cursor), from a registry of 1,000 or of 100,000 | 76 to 99 µs |
+| A whole `tools/call` through a connection (parse, validate, gate, handler, result), inline, with 1 or 100,000 tools registered | 2.8 to 3.7 µs |
 
 <br>
 
