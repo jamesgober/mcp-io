@@ -3,9 +3,10 @@
 //! Every subschema becomes one [`Node`] in a vector, and every reference to a
 //! subschema (`properties`, `items`, `$ref`, ...) is an index into it, so
 //! validation follows integers instead of looking names up. `$ref` targets
-//! are resolved here, once: a reference that cannot be resolved, or that
-//! points outside the document, refuses the schema at registration rather
-//! than letting it accept everything at call time.
+//! are resolved here, once: a reference that cannot be resolved, that
+//! points outside the document, or that loops back to the same instance
+//! without descending into it refuses the schema at registration rather
+//! than letting it accept everything, or refuse everything, at call time.
 
 use std::collections::BTreeMap;
 
@@ -184,7 +185,80 @@ impl<'d> Compiler<'d> {
         }
         let root = self.compile(self.root, String::new(), 0)?;
         self.resolve_refs()?;
+        self.refuse_cycles()?;
         Ok((self.nodes, root))
+    }
+
+    /// Refuses a subschema that applies itself to the same instance: a
+    /// cycle of `$ref` (and `allOf`, `anyOf`, `oneOf`, `not`, `if`, `then`,
+    /// `else`, `dependentSchemas`, which apply to the instance in hand)
+    /// that never descends into a property or an item. Validation through
+    /// it would never end; refusing it here keeps a server bug from
+    /// reading as an over-budget client.
+    fn refuse_cycles(&self) -> Result<(), SchemaError> {
+        // 0: unvisited, 1: on the current path, 2: done.
+        let mut state = vec![0u8; self.nodes.len()];
+        let mut stack: Vec<(u32, Vec<u32>)> = Vec::new();
+        for start in 0..self.nodes.len() {
+            if state.get(start).copied() != Some(0) {
+                continue;
+            }
+            let start = u32::try_from(start).unwrap_or(u32::MAX);
+            if let Some(s) = state.get_mut(start as usize) {
+                *s = 1;
+            }
+            stack.push((start, self.same_instance(start)));
+            while let Some((node, next)) = stack.last_mut() {
+                let node = *node;
+                let Some(child) = next.pop() else {
+                    if let Some(s) = state.get_mut(node as usize) {
+                        *s = 2;
+                    }
+                    let _done = stack.pop();
+                    continue;
+                };
+                match state.get(child as usize).copied() {
+                    Some(0) => {
+                        if let Some(s) = state.get_mut(child as usize) {
+                            *s = 1;
+                        }
+                        stack.push((child, self.same_instance(child)));
+                    }
+                    Some(1) => {
+                        let pointer = self
+                            .by_pointer
+                            .iter()
+                            .find(|&(_, &index)| index == child)
+                            .map(|(pointer, _)| pointer.clone())
+                            .unwrap_or_default();
+                        return Err(SchemaError::new(pointer, SchemaErrorKind::ReferenceCycle));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The subschemas node `index` applies to the instance it is given.
+    fn same_instance(&self, index: u32) -> Vec<u32> {
+        let Some(Node::Keywords(k)) = self.nodes.get(index as usize) else {
+            return Vec::new();
+        };
+        let mut out: Vec<u32> = k
+            .all_of
+            .iter()
+            .chain(&k.any_of)
+            .chain(&k.one_of)
+            .copied()
+            .collect();
+        out.extend(
+            [k.reference, k.not, k.if_, k.then, k.else_]
+                .into_iter()
+                .flatten(),
+        );
+        out.extend(k.dependent_schemas.iter().map(|(_, schema)| *schema));
+        out
     }
 
     fn compile(

@@ -169,11 +169,31 @@ fn test_recursive_schema_validates_recursive_data() {
 }
 
 #[test]
-fn test_self_reference_without_progress_exhausts_the_budget() {
-    let looping = schema(json!({ "$ref": "#" }));
-    let errors = looping.validate(&json!(1)).unwrap_err();
-    assert!(errors.budget_exceeded());
-    assert_eq!(errors.errors()[0].keyword(), "budget");
+fn test_references_that_never_descend_are_refused_at_compile_time() {
+    for looping in [
+        json!({ "$ref": "#" }),
+        json!({ "$defs": { "a": { "$ref": "#/$defs/b" }, "b": { "$ref": "#/$defs/a" } }, "$ref": "#/$defs/a" }),
+        json!({ "$defs": { "a": { "$ref": "#/$defs/a" } } }),
+        json!({ "anyOf": [{ "type": "string" }, { "$ref": "#" }] }),
+        json!({ "allOf": [{ "not": { "$ref": "#" } }] }),
+        json!({ "if": { "$ref": "#" } }),
+        json!({ "if": true, "then": { "$ref": "#" } }),
+        json!({ "dependentSchemas": { "a": { "$ref": "#" } } }),
+        json!({ "$defs": { "x": { "$anchor": "x", "oneOf": [{ "$ref": "#x" }] } } }),
+    ] {
+        let error = refused(looping.clone());
+        assert_eq!(error.kind(), &SchemaErrorKind::ReferenceCycle, "{looping}");
+    }
+    // Descending into a property or an item between references is progress.
+    for recursive in [
+        json!({ "properties": { "next": { "$ref": "#" } } }),
+        json!({ "items": { "$ref": "#" } }),
+        json!({ "anyOf": [{ "type": "null" }, { "prefixItems": [{ "$ref": "#" }] }] }),
+        json!({ "$defs": { "a": { "additionalProperties": { "$ref": "#/$defs/b" } }, "b": { "allOf": [{ "$ref": "#/$defs/a" }] } }, "$ref": "#/$defs/a" }),
+        json!({ "$defs": { "int": { "type": "integer" } }, "allOf": [{ "$ref": "#/$defs/int" }, { "$ref": "#/$defs/int" }] }),
+    ] {
+        assert!(Schema::compile(&recursive).is_ok(), "{recursive}");
+    }
 }
 
 #[test]
@@ -428,6 +448,7 @@ fn test_every_error_kind_displays_its_fix() {
         SchemaErrorKind::UnresolvedRef {
             reference: "#/x".into(),
         },
+        SchemaErrorKind::ReferenceCycle,
         SchemaErrorKind::TooDeep { limit: 2 },
         SchemaErrorKind::TooLarge { limit: 3 },
     ];

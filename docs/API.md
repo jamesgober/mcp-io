@@ -538,6 +538,8 @@ one is refused (keyword `number`) wherever its value matters (`enum`,
 `SchemaError`: `pointer()` (into the schema), `kind()`; `SchemaErrorKind`
 (`#[non_exhaustive]`): `NotASchema`, `InvalidKeyword`, `Unsupported`,
 `UnsupportedDialect`, `DuplicateAnchor`, `NonLocalRef`, `UnresolvedRef`,
+`ReferenceCycle` (a `$ref` cycle that never descends into a property or an
+item, such as `{"$ref": "#"}`, which validation could never finish),
 `TooDeep`, `TooLarge`. `Violations`: `errors()`, `truncated()`,
 `budget_exceeded()`; `ValidationError`: `instance_path()` (JSON Pointer),
 `keyword()`, `message()` (never quotes instance values). Paths and messages

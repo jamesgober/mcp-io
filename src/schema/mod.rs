@@ -243,7 +243,9 @@ impl Schema {
     /// A [`SchemaError`] naming the subschema (as a JSON Pointer into
     /// `schema`) and why: not a schema, a keyword with an invalid value, a
     /// keyword or dialect this validator does not support, a `$ref` that
-    /// cannot be resolved inside the document, or a budget exceeded.
+    /// cannot be resolved inside the document, a subschema that applies
+    /// itself to the same instance through `$ref` (a cycle that never
+    /// descends into a property or an item), or a budget exceeded.
     ///
     /// # Examples
     ///
@@ -437,6 +439,12 @@ pub enum SchemaErrorKind {
         /// The reference.
         reference: String,
     },
+    /// A subschema that applies itself to the same instance: a cycle of
+    /// `$ref` (or of `allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else`,
+    /// `dependentSchemas` through `$ref`) that never descends into a
+    /// property or an item, such as `{"$ref": "#"}`. Validation through it
+    /// would never end. Break the cycle.
+    ReferenceCycle,
     /// Subschemas nested deeper than [`SchemaLimits::max_depth`].
     TooDeep {
         /// The limit.
@@ -475,6 +483,10 @@ impl fmt::Display for SchemaErrorKind {
             Self::UnresolvedRef { reference } => write!(
                 f,
                 "the reference {reference:?} has no target in this schema"
+            ),
+            Self::ReferenceCycle => f.write_str(
+                "this subschema applies itself to the same instance through `$ref` without \
+                 descending into a property or an item, so validation would never end",
             ),
             Self::TooDeep { limit } => {
                 write!(f, "subschemas nest deeper than the limit of {limit}")
