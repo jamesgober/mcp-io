@@ -1,0 +1,12 @@
+2026-07-28.json and 2025-11-25.json are the JSON Schemas of the Model Context
+Protocol specification, https://github.com/modelcontextprotocol/modelcontextprotocol,
+copied unmodified from schema/<revision>/schema.json at commit
+1155ca460e5097019f32769b38dcba194432e2fb.
+
+They are licensed as LICENSE in this directory states (the MCP project's
+Apache-2.0 / MIT terms). They are test data only: they are not part of the
+published crate (Cargo.toml `include` leaves tests/ out).
+
+tests/conformance.rs validates every message the server sends in its
+scenarios against the definitions of the matching revision, as the official
+conformance suite's wire-schema check does.
