@@ -193,6 +193,17 @@ fn test_malformed_calls_and_unknown_tools_are_protocol_errors() {
         reply["error"]["message"].as_str().unwrap().len() < 200,
         "peer text is clipped"
     );
+    // A repeated key, in the arguments or in the params themselves, is
+    // invalid params, not a server failure.
+    for params in [
+        r#""name":"add","arguments":{"a":1,"a":2}"#,
+        r#""name":"add","name":"add","arguments":{}"#,
+    ] {
+        let reply = client.request(&modern(7, "tools/call", params));
+        assert_eq!(code(&reply), Some(-32602), "{params}");
+        let message = reply["error"]["message"].as_str().unwrap();
+        assert!(message.contains("duplicate"), "{message}");
+    }
 }
 
 #[test]

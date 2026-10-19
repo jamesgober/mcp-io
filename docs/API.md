@@ -84,7 +84,7 @@ both, per request:
 | Situation | Answer |
 |---|---|
 | Arguments fail the input schema; the policy denies; the handler returns a `ToolError::new`; the user declines a confirmation | A result with `isError: true` and a message for the model. |
-| Unknown tool; missing `name`; `arguments` not an object; params not an object; a malformed `_meta` field; an unknown cursor; an invalid `requestState` | `-32602` |
+| Unknown tool; missing `name`; `arguments` not an object; params not an object or holding a repeated key; a malformed `_meta` field; an unknown cursor; an invalid `requestState` | `-32602` |
 | A version this server does not serve | `-32022`, `data: {"supported": [...], "requested": ...}`; `supported` holds only the versions a request may name in `_meta` (2026-07-28), since the legacy ones are reached through `initialize` |
 | A confirmation needed, and no form elicitation declared | `-32021`, `data: {"requiredCapabilities": {"elicitation": {"form": {}}}}` |
 | Handler panic; output not matching the output schema; the call queue full | `-32603` |

@@ -100,12 +100,14 @@ pub(crate) fn run(job: Job) {
     };
     let mut seen: Option<(Arc<Entry>, Era, Option<String>)> = None;
     let (outcome, answer) = match &parsed {
-        // rpc-io has validated this text within the same budgets.
-        Err(_) => (
-            Outcome::Failed,
-            Answer::Error(ErrorObject::internal_error(
-                "the call's params could not be read",
-            )),
+        // rpc-io checked that the message is JSON; the tree is built here,
+        // and building it can still refuse what a scan accepts (a repeated
+        // key, the memory budget). The params are the client's: `-32602`.
+        Err(error) => (
+            Outcome::Refused,
+            Answer::Error(ErrorObject::invalid_params(format!(
+                "invalid params: {error}"
+            ))),
         ),
         Ok(params) => match prepare(&job, params) {
             Err(error) => (Outcome::Refused, Answer::Error(error)),
