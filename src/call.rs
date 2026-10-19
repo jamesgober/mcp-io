@@ -236,8 +236,17 @@ fn execute(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> (Ou
         client_info: job.client_info.as_ref(),
         era: job.era,
     };
-    let decision = catch_unwind(AssertUnwindSafe(|| job.shared.policy.decide(&request)))
-        .unwrap_or_else(|_| Decision::deny("the server's permission policy failed"));
+    // The policy decides a call once. A 2026-07-28 retry that carries a
+    // `requestState` was decided when the confirmation was asked for: it
+    // goes to the confirmation, which runs it only if the ledger holds that
+    // state for this tool and these arguments.
+    let retry = job.era == Era::Modern && params.get("requestState").is_some();
+    let decision = if retry {
+        Decision::Confirm
+    } else {
+        catch_unwind(AssertUnwindSafe(|| job.shared.policy.decide(&request)))
+            .unwrap_or_else(|_| Decision::deny("the server's permission policy failed"))
+    };
     match permission::effective(job.entry.tier, decision) {
         Decision::Allow => {}
         Decision::Deny(reason) => {

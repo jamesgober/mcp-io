@@ -149,27 +149,37 @@ impl<'a> PermissionRequest<'a> {
 /// with a retry hint is how). A closure `Fn(&PermissionRequest) -> Decision`
 /// is a policy. A policy that panics denies the call.
 ///
+/// It is consulted once per call. On 2026-07-28 a confirmed call arrives
+/// twice (the call, then its retry with the `requestState` and the user's
+/// answer); the policy decides the first, and the retry is not decided
+/// again: it runs only if it redeems the confirmation the first one issued.
+///
 /// # Examples
 ///
 /// ```
-/// use std::sync::atomic::{AtomicU32, Ordering};
+/// use std::sync::Mutex;
 /// use mcp_io::{Decision, PermissionRequest, Policy, Tier};
 ///
-/// /// Read-only tools run; at most 100 other calls are allowed, each confirmed.
-/// struct Budgeted { left: AtomicU32 }
+/// /// Read-only tools run; at most 100 other calls are allowed, each confirmed
+/// /// (one asked for and declined counts too).
+/// struct Budgeted { left: Mutex<u32> }
 ///
 /// impl Policy for Budgeted {
 ///     fn decide(&self, request: &PermissionRequest<'_>) -> Decision {
 ///         if request.tier() == Tier::ReadOnly {
 ///             return Decision::Allow;
 ///         }
-///         match self.left.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)) {
-///             Ok(_) => Decision::Confirm,
-///             Err(_) => Decision::deny("the session's budget of changes is spent"),
+///         let mut left = self.left.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+///         match left.checked_sub(1) {
+///             Some(rest) => {
+///                 *left = rest;
+///                 Decision::Confirm
+///             }
+///             None => Decision::deny("the session's budget of changes is spent"),
 ///         }
 ///     }
 /// }
-/// # let _ = Budgeted { left: AtomicU32::new(100) };
+/// # let _ = Budgeted { left: Mutex::new(100) };
 /// ```
 pub trait Policy: Send + Sync + 'static {
     /// Decides one call.

@@ -413,6 +413,8 @@ hold `with_max_pending_confirmations` (64) of them, its oldest forgotten
 first. The client retries the call (a new id, the same name and
 arguments) with that `requestState` and `inputResponses.confirm =
 {"action": "accept", "content": {"confirm": true}}`; the tool then runs.
+The policy is not consulted for the retry: it decided the call when the
+confirmation was asked for, so a policy that counts calls counts it once.
 `decline`, `cancel`, or `confirm: false` is a tool error; a retry without an
 answer is asked again. A `requestState` names a server-side entry bound to
 the tool's registration (a tool removed and registered again does not

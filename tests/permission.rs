@@ -227,6 +227,43 @@ fn test_publish_always_asks_even_when_the_policy_allows() {
 }
 
 #[test]
+fn test_the_policy_decides_a_confirmed_call_once() {
+    // A budget of two confirmed calls allows two, not one: the retry that
+    // carries the confirmation is not charged again.
+    let runs = Arc::new(AtomicUsize::new(0));
+    let decided = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&decided);
+    let left = Mutex::new(2u32);
+    let server = server(&runs).policy(move |_: &PermissionRequest<'_>| {
+        let _ = seen.fetch_add(1, Ordering::SeqCst);
+        let mut left = left.lock().unwrap();
+        match left.checked_sub(1) {
+            Some(rest) => {
+                *left = rest;
+                Decision::Confirm
+            }
+            None => Decision::deny("the budget is spent"),
+        }
+    });
+    let mut client = Client::new(&server);
+    for round in 0..2u64 {
+        let reply = client.request(&call_with(round * 2 + 1, "edit", FORM, ""));
+        let state = reply["result"]["requestState"].as_str().unwrap().to_owned();
+        let reply = client.request(&call_with(round * 2 + 2, "edit", FORM, &accept(&state)));
+        assert_eq!(text(&reply), "edit ran", "round {round}");
+    }
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    assert_eq!(decided.load(Ordering::SeqCst), 2, "once per confirmed call");
+    let reply = client.request(&call_with(5, "edit", FORM, ""));
+    assert_eq!(text(&reply), "Permission denied: the budget is spent");
+    // A retry is not a way around the policy: a state it never issued is
+    // refused, even for a tool the policy would allow outright.
+    let reply = client.request(&call_with(6, "read", FORM, &accept("forged")));
+    assert_eq!(code(&reply), Some(-32602));
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn test_policy_denials_and_panics_are_tool_errors() {
     let runs = Arc::new(AtomicUsize::new(0));
     let server = server(&runs).policy(|request: &PermissionRequest<'_>| {
