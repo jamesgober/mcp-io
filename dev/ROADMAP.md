@@ -22,16 +22,18 @@ Delivered:
 - `schema`: a first-party JSON Schema 2020-12 validator for a documented subset, with exact decimal numbers, `O(n log n)` `uniqueItems`, local references and anchors, compile and validation budgets, and refusal of everything outside the subset at registration.
 - Permissions: `Policy`, `Decision`, `Ceiling`, `PermissionRequest`; confirmation through MRTR form elicitation with a single-use, server-side `requestState` (2026-07-28) and through server-sent `elicitation/create` (legacy); `-32021` without elicitation; `Publish` always confirmed; `AuditRecord`/`Outcome` through `on_audit`.
 - Execution: a bounded worker pool per connection (cancellation reaches running calls), `ToolCall` with cancellation and request-bound, increasing progress; `subscriptions/listen` with acknowledgment, `subscriptionId` tagging, `toolsListChanged`, and graceful closure on a server-side close; plain list changes for legacy sessions.
+- Typed tools: `ToolCall::decode::<T: FromJson>()` reads the arguments from the request's own text (types that borrow, such as `&str` and `Cow<str>`, borrow with no copy); `Server::tool_json` / `Tools::add_json` decode the arguments into an owned type and send a `ToJson` result as structured content; `JsonSchema` with `Tool::input_schema_for` / `output_schema_for` keeps a type's schema next to its decoder. The untyped `Value` path stays.
 - Transport: `Server::serve`/`serve_stdio` on rpc-io's newline framing and output queue, `Connection` over any `Sink`; end of input handles a last unterminated line and drains running calls (bounded by `with_drain_timeout`).
 - Tests: lifecycle, tools, permission, and transport suites; wire conformance against the official MCP JSON Schemas (2026-07-28, 2025-11-25) from the spec's examples; the JSON Schema Test Suite; property tests against reference implementations; an end-to-end child-process test; fuzz targets (`server`, `schema`) with their checks in `cargo test`; criterion benchmarks.
 
 Moved, per the anti-deferral rule:
 - **Progress and cancellation** (listed under v0.5.0) were delivered here: 2026-07-28 makes them part of serving any tool call (cancellation is how a stdio client abandons a call, and progress is request-scoped), and rpc-io 0.4 provides the request-bound progress handle.
 - **`subscriptions/listen` and list-changed notifications** (v0.5.0's "notifications") were delivered here for tools: 2026-07-28 delivers list changes only on a listen stream, and advertising `listChanged` without one would be false.
+- **Typed arguments and results through jsonx-lib's `FromJson`/`ToJson`** (planned for v0.3.0 once `FromJson` was found not to have landed) were delivered here: jsonx-lib 0.5 and rpc-io 0.4 finished their typed APIs during this release.
 - **Fuzzing** (listed under v0.9.0) was delivered here: DIRECTIVES §3.6 requires a fuzz target for every parser of untrusted input, and the `_meta` handling and schema compiler are such parsers.
 
 Deferred, with reasons:
-- **Typed tool arguments through jsonx-lib's `FromJson`** (`ToolCall::decode::<T>()` and a typed builder deriving schema and decoder from one definition): jsonx-lib 0.5's `FromJson` had not landed when 0.2.0 was finished; `ToolResult::encode` covers `ToJson` output. Moves to v0.3.0.
+- **Borrowing typed handlers through `tool_json`**: `tool_json` takes owned argument types (`A: for<'de> FromJson<'de>`); a handler's argument type cannot name the request's lifetime without a generic-associated-type trait users would have to implement. Borrowing arguments are read with `ToolCall::decode` inside an ordinary handler instead. Revisit with the 1.0 surface.
 - **`pattern` and `patternProperties`**: need a regular-expression engine (ECMA-262 dialect); there is no first-party one and DIRECTIVES forbids a rented one. Schemas using them are refused at registration. Moves to v0.5.0, or earlier if a first-party regex crate lands.
 - **`unevaluatedProperties`/`unevaluatedItems`, `$dynamicRef`, nested `$id`**: need annotation collection and base-URI tracking across the validator; refused at registration until then. v0.9.0.
 - **The official MCP conformance suite in CI** (audit MCP-TST-01): its server runner drives servers over HTTP only (`--url`); it cannot run against stdio. Until the HTTP transport exists, `tests/conformance.rs` performs its wire-schema check against the official schemas. Moves to v0.5.0 with HTTP.
@@ -40,10 +42,6 @@ Deferred, with reasons:
 - **URL-mode elicitation and the Tasks extension**: v0.5.0 or later.
 - **`icons` on tools and on `Implementation`, and tool `_meta`** (audit Nice-to-have): optional display metadata; v0.5.0, with resources and prompts, which carry the same fields.
 - **The `extensions` map in capabilities** (audit MCP-ARC-09): no extension is implemented, so none is advertised; capabilities are rendered internally, so adding the map later is not a breaking change.
-
-## v0.3.0 - Typed tools
-- [ ] Typed arguments through jsonx-lib 0.5's `FromJson` (moved from v0.2.0, see above).
-- [ ] A typed tool builder: the input schema and the decoder from one definition.
 
 ## v0.5.0 - Implementation
 - [ ] Resources (`resources/list`, `resources/templates/list`, `resources/read`, `resourceSubscriptions` on `subscriptions/listen`) and prompts (`prompts/list`, `prompts/get`, `promptsListChanged`).

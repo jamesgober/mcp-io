@@ -39,7 +39,7 @@
 | [`Connection`](#connection) | struct | One served connection over any rpc-io `Sink`. |
 | [`Lifecycle`](#lifecycle) | enum | A connection's legacy (`initialize`) session state. |
 | [`Implementation`](#implementation-and-cachescope), [`CacheScope`](#implementation-and-cachescope) | struct, enum | The server's `serverInfo`; who may cache list results. |
-| [`Tool`](#tool-and-tier), [`Tier`](#tool-and-tier) | struct, enum | A tool's definition; how much it can change. |
+| [`Tool`](#tool-and-tier), [`Tier`](#tool-and-tier), [`JsonSchema`](#tool-and-tier) | struct, enum, trait | A tool's definition; how much it can change; a type's schema. |
 | [`Tools`](#tools) | struct | The tool set, changeable while serving. |
 | [`ToolCall`](#toolcall) | struct | One call, as its handler sees it. |
 | [`ToolResult`](#toolresult-content-resourcecontents), [`Content`](#toolresult-content-resourcecontents), [`ResourceContents`](#toolresult-content-resourcecontents) | struct, enums | What a tool returns. |
@@ -125,6 +125,7 @@ unless the host replaces the hook.
 | `new(info: Implementation) -> Self` | No tools, the default policy (`Ceiling(Tier::Mutating)`), default settings. |
 | `instructions(self, text) -> Self` | MCP `instructions` (in `server/discover` and `initialize`). |
 | `tool(self, tool, handler) -> Result<Self, RegisterError>` | Registers a tool; `handler: Fn(&ToolCall) -> Result<ToolResult, ToolError> + Send + Sync + 'static`. |
+| `tool_json(self, tool, handler) -> Result<Self, RegisterError>` | Registers a typed tool; `handler: Fn(&ToolCall, A) -> Result<R, ToolError>`, `A: for<'de> FromJson<'de>` (decoded after the schema check), `R: ToJson` (sent as structured content with a text copy). |
 | `tools(&self) -> Tools` | The tool set, to change while serving. |
 | `policy(self, impl Policy) -> Self` | The permission policy. |
 | `on_audit(self, Fn(&AuditRecord) + Send + Sync + 'static) -> Self` | The audit hook, once per `tools/call`. |
@@ -248,7 +249,8 @@ assert_eq!(CacheScope::Private.as_str(), "private");
 Publish`; `name()`, `Display`.
 
 `Tool::new(name, tier)` with `title`, `description`, `input_schema(Value)`,
-`output_schema(Value)`, `idempotent(bool)`, `open_world(bool)`,
+`output_schema(Value)`, `input_schema_for::<T: JsonSchema>()`,
+`output_schema_for::<T: JsonSchema>()`, `idempotent(bool)`, `open_world(bool)`,
 `confirmation(question)`; accessors `name`, `tier`, `title_text`,
 `description_text`, `input_schema_value`, `output_schema_value`,
 `annotations_json`. Registration checks the name (1 to 128 of
@@ -262,6 +264,10 @@ compiles both schemas. Without an input schema the tool takes `{}` only
 | `Mutating` | `readOnlyHint: false`, `destructiveHint: false` (+ `idempotentHint`, `openWorldHint` if set) |
 | `Destructive` | `readOnlyHint: false`, `destructiveHint: true` (+ as above) |
 | `Publish` | `readOnlyHint: false`, `destructiveHint: true`, `openWorldHint: true` (+ `idempotentHint` if set) |
+
+`JsonSchema` is a trait with one function, `json_schema() -> Value<'static>`:
+a type's schema, written next to its `FromJson`/`ToJson` impl, so a typed
+tool's schema and decoder are defined together.
 
 ```rust
 use mcp_io::{Tier, Tool, jsonx::json};
@@ -278,7 +284,8 @@ assert!(Tier::Destructive > Tier::Mutating);
 ## `Tools`
 
 `Clone + Send + Sync`, from `Server::tools()`: `add(tool, handler) ->
-Result<(), RegisterError>`, `remove(name) -> bool`, `contains(name)`,
+Result<(), RegisterError>`, `add_json(tool, handler)` (as
+`Server::tool_json`), `remove(name) -> bool`, `contains(name)`,
 `names()` (sorted), `len()`, `is_empty()`. Every connection sees changes at
 once; watchers get `notifications/tools/list_changed` (on a
 `subscriptions/listen` stream, tagged with its `subscriptionId`; on an
@@ -306,6 +313,12 @@ input schema; `{}` when none were sent), `id()`, `era()`,
 legacy session's), `client_info()` (self-reported; display only),
 `is_cancelled()`, `cancel_token()`, `wants_progress()`, and
 `progress(progress, total, message) -> Result<(), Error>`.
+
+`decode::<T>()` reads the arguments as any jsonx-lib `FromJson<'a>` type
+from the request's own text: a type that borrows (`&'a str`, `Cow<'a, str>`)
+borrows from the message with no copy (a string with escapes is unescaped
+into a copy). Absent arguments read as `{}`. Arguments that pass the schema
+but not `T` are a tool execution error naming the place (`/arguments/...`).
 
 `progress` does nothing when the client sent no `_meta.progressToken`. It
 refuses a value that does not increase (`Error::ProgressNotIncreasing`), any

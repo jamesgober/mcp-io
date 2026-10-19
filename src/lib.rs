@@ -50,7 +50,9 @@
 //!   before the handler runs, structured results against its output schema
 //!   after. The validator is this crate's own, for a documented subset of
 //!   JSON Schema 2020-12 ([`schema`]); a schema outside the subset is refused
-//!   at registration, never half-applied.
+//!   at registration, never half-applied. Arguments can also be read as
+//!   typed values ([`ToolCall::decode`], [`Server::tool_json`]), borrowing
+//!   from the request where the type does.
 //! - **Errors as MCP wants them.** Invalid arguments, denials, and handler
 //!   failures are tool results with `isError: true` that the model can read;
 //!   unknown tools and malformed requests are JSON-RPC errors. A panicking
