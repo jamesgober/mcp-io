@@ -329,6 +329,11 @@ fn test_legacy_confirmation_refusals() {
         .request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"publish"}}"#);
     assert_eq!(reply["result"]["isError"], true);
     assert!(text(&reply).contains("elicitation"));
+    assert!(
+        !text(&reply).contains("  "),
+        "no run of spaces: {}",
+        text(&reply)
+    );
     // No workers: the answer cannot be waited for.
     let s = server(&runs).with_workers(0);
     let mut client = Client::new(&s);
@@ -337,6 +342,11 @@ fn test_legacy_confirmation_refusals() {
         .request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"publish"}}"#);
     assert_eq!(reply["result"]["isError"], true);
     assert!(text(&reply).contains("worker threads"));
+    assert!(
+        !text(&reply).contains("  "),
+        "no run of spaces: {}",
+        text(&reply)
+    );
     assert_eq!(
         client
             .log

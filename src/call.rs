@@ -316,13 +316,15 @@ fn confirm_legacy(job: &Job, canonical: &str) -> Confirmation {
     };
     if !protocol::supports_form_elicitation(&job.capabilities) {
         return refuse(
-            "This tool needs the user's confirmation, and the client did not declare the              elicitation capability, so it cannot be asked; the tool was not run.",
+            "This tool needs the user's confirmation, and the client did not declare the \
+             elicitation capability, so it cannot be asked; the tool was not run.",
         );
     }
     if job.shared.settings.workers == 0 {
         // The answer would arrive on the thread that is running this call.
         return refuse(
-            "This tool needs the user's confirmation, which this server cannot wait for              (it runs tool calls without worker threads); the tool was not run.",
+            "This tool needs the user's confirmation, which this server cannot wait for \
+             (it runs tool calls without worker threads); the tool was not run.",
         );
     }
     let message = question(job, canonical);
