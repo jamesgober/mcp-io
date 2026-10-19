@@ -544,3 +544,85 @@ fn test_legacy_calls_use_the_session_capabilities() {
     let reply = client.request(&call(2, "caps", "{}"));
     assert_eq!(text(&reply), "2026-07-28 {}");
 }
+
+/// Typed arguments: a struct that borrows its strings from the request.
+struct Search<'a> {
+    query: std::borrow::Cow<'a, str>,
+    limit: Option<u32>,
+}
+
+impl<'a> mcp_io::jsonx::FromJson<'a> for Search<'a> {
+    fn from_json(
+        reader: &mut mcp_io::jsonx::Reader<'a>,
+    ) -> Result<Self, mcp_io::jsonx::DecodeError> {
+        let (mut query, mut limit) = (None, None);
+        let mut object = reader.read_object()?;
+        while let Some(key) = object.next_key()? {
+            match &*key {
+                "query" => object.field(&mut query)?,
+                "limit" => object.field(&mut limit)?,
+                _ => object.skip()?,
+            }
+        }
+        Ok(Search {
+            query: object.required(query, "query")?,
+            limit: limit.unwrap_or(None),
+        })
+    }
+}
+
+#[test]
+fn test_typed_arguments_borrow_from_the_request() {
+    let server = base()
+        .with_workers(0)
+        .tool(
+            Tool::new("search", Tier::ReadOnly).input_schema(json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" }, "limit": { "type": "integer" } }
+            })),
+            |call| {
+                let search: Search<'_> = call.decode()?;
+                let borrowed = matches!(search.query, std::borrow::Cow::Borrowed(_));
+                Ok(ToolResult::text(format!(
+                    "{} {:?} {borrowed}",
+                    search.query, search.limit
+                )))
+            },
+        )
+        .unwrap()
+        .tool(
+            Tool::new("counts", Tier::ReadOnly).input_schema(json!({ "type": "object" })),
+            |call| {
+                let counts: std::collections::BTreeMap<String, u8> = call.decode()?;
+                Ok(ToolResult::text(format!("{counts:?}")))
+            },
+        )
+        .unwrap();
+    let mut client = Client::new(&server);
+    let reply = client.request(&call(1, "search", r#"{"query":"rust","limit":5}"#));
+    assert_eq!(
+        text(&reply),
+        "rust Some(5) true",
+        "no copy of an unescaped string"
+    );
+    let reply = client.request(&call(2, "search", r#"{"query":"a\"b"}"#));
+    assert_eq!(
+        text(&reply),
+        "a\"b None false",
+        "an escaped string is unescaped into a copy"
+    );
+    // The schema allows what the type refuses: a tool error naming where.
+    let reply = client.request(&call(3, "search", r#"{"limit":1}"#));
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(
+        text(&reply).starts_with("The arguments do not fit the tool `search`: "),
+        "{}",
+        text(&reply)
+    );
+    let reply = client.request(&call(4, "counts", r#"{"a":1,"b":300}"#));
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(text(&reply).contains("/b"), "{}", text(&reply));
+    // Absent arguments read as `{}`.
+    let reply = client.request(&modern(5, "tools/call", r#""name":"counts""#));
+    assert_eq!(text(&reply), "{}");
+}

@@ -360,7 +360,7 @@ impl Session {
         let job = Job {
             shared: Arc::clone(&self.shared),
             entry,
-            params: value.into_owned(),
+            text: params.raw().map(|raw| raw.clone().into_owned()),
             era,
             version,
             capabilities,

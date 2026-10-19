@@ -14,16 +14,19 @@ use std::{
 };
 
 use crate::{
-    AuditRecord, Decision, Error, Outcome, PermissionRequest, Tier, ToolResult,
+    AuditRecord, Decision, Error, Outcome, PermissionRequest, Tier, ToolError, ToolResult,
     content::ToolErrorKind,
     json::{self, Obj},
     jsonx::{self, Value},
     permission::{self, Redeem},
     protocol::{self, Era},
     registry::Entry,
-    rpc_io::{CallError, CancelToken, ErrorObject, Id, Progress, Responder},
+    rpc_io::{CallError, CancelToken, ErrorObject, Id, Progress, Raw, Responder},
     server::Shared,
 };
+
+/// The `params` of a call that sent none.
+const NO_PARAMS: &str = "{}";
 
 /// The key of the confirmation in `inputRequests` / `inputResponses`.
 const CONFIRM_KEY: &str = "confirm";
@@ -35,8 +38,9 @@ const SHOWN_ARGUMENTS: usize = 2048;
 pub(crate) struct Job {
     pub(crate) shared: Arc<Shared>,
     pub(crate) entry: Arc<Entry>,
-    /// The request's whole `params` object.
-    pub(crate) params: Value<'static>,
+    /// The request's `params` text (`None` when absent), parsed again on the
+    /// worker: the parsed tree and typed arguments borrow from it.
+    pub(crate) text: Option<Raw<'static>>,
     pub(crate) era: Era,
     pub(crate) version: &'static str,
     pub(crate) capabilities: Value<'static>,
@@ -68,12 +72,28 @@ enum Confirmation {
 
 /// Runs `job` to its answer.
 pub(crate) fn run(job: Job) {
-    let empty = Value::Object(jsonx::Object::new());
-    let arguments = match job.params.get("arguments") {
-        Some(arguments @ Value::Object(_)) => arguments,
-        _ => &empty,
+    let parser = job.shared.settings.limits.parser();
+    let parsed = match &job.text {
+        None => Ok(Value::Null),
+        Some(raw) => raw.parse_with(&parser),
     };
-    let (outcome, answer) = execute(&job, arguments);
+    let (outcome, answer) = match &parsed {
+        Ok(params) => {
+            let empty = Value::Object(jsonx::Object::new());
+            let arguments = match params.get("arguments") {
+                Some(arguments @ Value::Object(_)) => arguments,
+                _ => &empty,
+            };
+            execute(&job, params, arguments)
+        }
+        // The endpoint has parsed this text within the same budgets already.
+        Err(_) => (
+            Outcome::Failed,
+            Answer::Error(ErrorObject::internal_error(
+                "the call's params could not be read again",
+            )),
+        ),
+    };
     let id = job.responder.id().clone();
     let sent = match answer {
         Answer::Result(text) => match json::raw(text) {
@@ -103,7 +123,7 @@ pub(crate) fn run(job: Job) {
     });
 }
 
-fn execute(job: &Job, arguments: &Value<'_>) -> (Outcome, Answer) {
+fn execute(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> (Outcome, Answer) {
     if job.responder.is_cancelled() {
         return (Outcome::Cancelled, Answer::Nothing);
     }
@@ -132,7 +152,7 @@ fn execute(job: &Job, arguments: &Value<'_>) -> (Outcome, Answer) {
             let message = format!("Permission denied: {reason}");
             return (Outcome::Denied, Answer::Result(tool_error(job, message)));
         }
-        Decision::Confirm => match confirm(job, arguments) {
+        Decision::Confirm => match confirm(job, params, arguments) {
             Confirmation::Granted => {}
             Confirmation::Stop(outcome, answer) => return (outcome, answer),
         },
@@ -151,6 +171,8 @@ fn execute(job: &Job, arguments: &Value<'_>) -> (Outcome, Answer) {
         client_info: job.client_info.as_ref(),
         token: job.responder.token(),
         progress: job.progress.as_ref(),
+        text: job.text.as_ref().map_or(NO_PARAMS, Raw::as_str),
+        parser: job.shared.settings.limits.parser(),
     };
     let outcome = catch_unwind(AssertUnwindSafe(|| (job.entry.handler)(&call)));
     match outcome {
@@ -207,7 +229,7 @@ fn tool_error(job: &Job, message: String) -> String {
 }
 
 /// Obtains the user's confirmation for a call, through the client.
-fn confirm(job: &Job, arguments: &Value<'_>) -> Confirmation {
+fn confirm(job: &Job, params: &Value<'_>, arguments: &Value<'_>) -> Confirmation {
     let Ok(canonical) = crate::schema::canonical_text(arguments) else {
         let message =
             "Permission denied: the arguments are too deeply nested to show for confirmation";
@@ -217,16 +239,16 @@ fn confirm(job: &Job, arguments: &Value<'_>) -> Confirmation {
         );
     };
     match job.era {
-        Era::Modern => confirm_modern(job, canonical),
+        Era::Modern => confirm_modern(job, params, canonical),
         Era::Legacy => confirm_legacy(job, &canonical),
     }
 }
 
 /// 2026-07-28: answer with an `InputRequiredResult`, or run on a retry that
 /// carries a valid `requestState` and the user's acceptance.
-fn confirm_modern(job: &Job, canonical: String) -> Confirmation {
+fn confirm_modern(job: &Job, params: &Value<'_>, canonical: String) -> Confirmation {
     let name = &*job.entry.name;
-    if let Some(state) = job.params.get("requestState") {
+    if let Some(state) = params.get("requestState") {
         let Some(state) = state.as_str() else {
             return stop_error(ErrorObject::invalid_params(
                 "`requestState` must be a string",
@@ -245,8 +267,7 @@ fn confirm_modern(job: &Job, canonical: String) -> Confirmation {
                 ));
             }
         }
-        let response = job
-            .params
+        let response = params
             .get("inputResponses")
             .and_then(|r| r.get(CONFIRM_KEY));
         match read_answer(response) {
@@ -477,6 +498,10 @@ pub struct ToolCall<'a> {
     client_info: Option<&'a Value<'a>>,
     token: CancelToken,
     progress: Option<&'a Progress>,
+    /// The request's `params` text, which typed arguments borrow from.
+    text: &'a str,
+    /// The endpoint's JSON budgets.
+    parser: jsonx::Parser,
 }
 
 impl<'a> ToolCall<'a> {
@@ -497,6 +522,69 @@ impl<'a> ToolCall<'a> {
     #[must_use]
     pub fn arguments(&self) -> &'a Value<'a> {
         self.arguments
+    }
+
+    /// The arguments as a typed value, any jsonx-lib
+    /// [`FromJson`](crate::jsonx::FromJson) type, read from the request's
+    /// own text: a type that borrows (`&'a str`, `Cow<'a, str>`) borrows from
+    /// the message, with no copy. Absent arguments read as `{}`. The
+    /// arguments have passed the tool's input schema already; this is the
+    /// typed view of them, under the endpoint's JSON budgets.
+    ///
+    /// # Errors
+    ///
+    /// A tool execution error (`isError: true`, so the model can fix its
+    /// call) naming where the arguments do not fit `T`: the type asks for
+    /// more than the schema does.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcp_io::{Implementation, Server, Tier, Tool, ToolResult, jsonx::{self, json}};
+    ///
+    /// struct Greet<'a> { name: &'a str, times: u8 }
+    ///
+    /// impl<'a> jsonx::FromJson<'a> for Greet<'a> {
+    ///     fn from_json(reader: &mut jsonx::Reader<'a>) -> Result<Self, jsonx::DecodeError> {
+    ///         let (mut name, mut times) = (None, None);
+    ///         let mut object = reader.read_object()?;
+    ///         while let Some(key) = object.next_key()? {
+    ///             match &*key {
+    ///                 "name" => object.field(&mut name)?,
+    ///                 "times" => object.field(&mut times)?,
+    ///                 _ => object.skip()?,
+    ///             }
+    ///         }
+    ///         Ok(Greet { name: object.required(name, "name")?, times: times.unwrap_or(1) })
+    ///     }
+    /// }
+    ///
+    /// let server = Server::new(Implementation::new("demo", "1.0.0")).tool(
+    ///     Tool::new("greet", Tier::ReadOnly).input_schema(json!({
+    ///         "type": "object",
+    ///         "properties": { "name": { "type": "string" }, "times": { "type": "integer", "minimum": 1, "maximum": 3 } },
+    ///         "required": ["name"]
+    ///     })),
+    ///     |call| {
+    ///         let greet: Greet<'_> = call.decode()?; // `name` borrows from the request
+    ///         Ok(ToolResult::text(vec![format!("Hello, {}!", greet.name); usize::from(greet.times)].join(" ")))
+    ///     },
+    /// )?;
+    /// # let _ = server;
+    /// # Ok::<(), mcp_io::RegisterError>(())
+    /// ```
+    pub fn decode<T: jsonx::FromJson<'a>>(&self) -> Result<T, ToolError> {
+        self.parser
+            .decode::<ArgumentsOf<T>>(self.text)
+            .map(|of| of.0)
+            .map_err(|error| {
+                let message = error.to_string();
+                ToolError::new(format!(
+                    "The arguments do not fit the tool `{}`: {}",
+                    self.name,
+                    protocol::clip(&message, 512)
+                ))
+            })
     }
 
     /// The request's JSON-RPC id.
@@ -591,6 +679,28 @@ impl<'a> ToolCall<'a> {
                 Err(Error::ProgressNotIncreasing { last, next })
             }
             Err(error) => Err(Error::Rpc(error)),
+        }
+    }
+}
+
+/// The `arguments` member of a `tools/call`'s params, read as `T` straight
+/// from the reader (other members skipped; absent arguments read as `{}`).
+struct ArgumentsOf<T>(T);
+
+impl<'de, T: jsonx::FromJson<'de>> jsonx::FromJson<'de> for ArgumentsOf<T> {
+    fn from_json(reader: &mut jsonx::Reader<'de>) -> Result<Self, jsonx::DecodeError> {
+        let mut found = None;
+        let mut object = reader.read_object()?;
+        while let Some(key) = object.next_key()? {
+            if key == "arguments" {
+                found = Some(object.value::<T>()?);
+            } else {
+                object.skip()?;
+            }
+        }
+        match found {
+            Some(value) => Ok(Self(value)),
+            None => jsonx::from_str::<T>(NO_PARAMS).map(Self),
         }
     }
 }
