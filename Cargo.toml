@@ -72,6 +72,12 @@ name    = "bench"
 harness = false
 
 
+# EXAMPLES
+# #################################
+[[example]]
+name = "stdio_server"
+
+
 # RELEASE PROFILE
 # #################################
 [profile.release]
