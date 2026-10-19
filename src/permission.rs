@@ -38,7 +38,8 @@
 //! `requestState` is a random 128-bit token naming an entry the server keeps:
 //! the tool's registration, a keyed 128-bit digest of the call's canonical
 //! arguments, and an expiry. Nothing in the token itself is trusted. A
-//! tampered or replayed token names no entry and is refused; an entry is
+//! tampered or replayed token names no entry and is refused (tokens are
+//! compared in constant time); an entry is
 //! removed when it is presented, so each confirmation runs at most one call;
 //! entries expire (10 minutes by default) and are capped per connection. The
 //! digest's keys are random per server, so a client cannot search for other
@@ -353,7 +354,7 @@ impl Ledger {
         let binding = self.bind(tool, generation, arguments);
         let now = Instant::now();
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(at) = pending.iter().position(|p| p.token == token) else {
+        let Some(at) = pending.iter().position(|p| same(&p.token, token)) else {
             return Err(Redeem::Unknown);
         };
         let entry = pending.remove(at);
@@ -373,6 +374,18 @@ impl Ledger {
             .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
+}
+
+/// Whether two tokens are equal, in time that depends only on their
+/// lengths (which are public: every token is the same length), never on
+/// where they first differ.
+fn same(issued: &str, presented: &str) -> bool {
+    let (a, b) = (issued.as_bytes(), presented.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let difference = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    core::hint::black_box(difference) == 0
 }
 
 /// A fresh, unpredictable confirmation token.
@@ -542,6 +555,20 @@ mod tests {
             Ok(()),
             "another connection's entry stays"
         );
+    }
+
+    #[test]
+    fn test_tokens_compare_whole() {
+        let token = token();
+        assert!(same(&token, &token.clone()));
+        let mut last = token.clone().into_bytes();
+        if let Some(byte) = last.last_mut() {
+            *byte ^= 1;
+        }
+        let last = String::from_utf8(last).unwrap_or_default();
+        assert!(!same(&token, &last), "a difference in the last byte counts");
+        assert!(!same(&token, &token[..token.len() - 1]));
+        assert!(!same(&token, ""));
     }
 
     #[test]
