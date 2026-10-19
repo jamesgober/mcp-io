@@ -16,7 +16,7 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Model Context Protocol server framework: tools, resources, prompts, permission tiers, and stdio/HTTP transports."
+description = "Model Context Protocol server framework: stateless MCP 2026-07-28 with a 2025-11-25 fallback, a tool registry with validated JSON Schema input, permission tiers, and a stdio transport over rpc-io."
 
 # Keywords (5 max)
 keywords = ["mcp", "ai", "llm", "protocol", "server"]
@@ -31,6 +31,21 @@ documentation = "https://docs.rs/mcp-io"
 
 # Authors
 authors = ["James Gober <me@jamesgober.com>"]
+
+# Package contents: the crate, its docs, examples, and benchmarks. Not the
+# engineering notes, the standards file, CI, the tests (with their vendored
+# test data), or the fuzz workspace.
+include = [
+    "src/**",
+    "examples/**",
+    "benches/**",
+    "docs/API.md",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+]
 
 [package.metadata.docs.rs]
 all-features = true
