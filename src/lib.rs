@@ -6,7 +6,6 @@
 //! series and frozen at v1.0. See `docs/API.md` and `dev/ROADMAP.md` for the
 //! current phase scope.
 
-#![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

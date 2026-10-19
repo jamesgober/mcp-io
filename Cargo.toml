@@ -43,9 +43,9 @@ path = "src/lib.rs"
 
 # FEATURE FLAGS
 # #################################
-[features]
-default = ["std"]
-std = []
+# None. A server needs threads, clocks and stdio, so the crate is `std` only
+# (the 0.1.0 scaffold's empty `std` feature was removed: it could only ever
+# have become mandatory).
 
 
 # DEPENDENCIES
@@ -74,5 +74,6 @@ harness = false
 opt-level     = 3
 lto           = "fat"
 codegen-units = 1
-panic         = "abort"
+# No `panic = "abort"`: a panicking tool handler is contained and answered
+# with an error, which needs unwinding in this crate's own examples and benches.
 strip         = "symbols"
