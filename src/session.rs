@@ -139,6 +139,7 @@ impl Session {
             settings.max_queued_calls,
             settings.max_queued_bytes,
         )?;
+        shared.ledger.open(connection);
         Ok(Self {
             shared,
             connection,
@@ -524,6 +525,10 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.shared.registry.unwatch(self.connection);
+        // Its confirmations go with it. A call still running on a worker
+        // cannot add one after this: the ledger issues only on open
+        // connections.
+        self.shared.ledger.close(self.connection);
     }
 }
 

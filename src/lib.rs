@@ -72,6 +72,9 @@
 //!
 //! - The gate cannot prove a human answered a confirmation: the client
 //!   relays it. See [`permission`].
+//! - Tool results are not marked or filtered: text a tool relays from
+//!   outside reaches the model as it is, and confirmation arguments are
+//!   written by the model. See [`permission`](permission#prompt-injection).
 //! - Resources, prompts, completion, the Tasks extension, the Streamable
 //!   HTTP transport, and the deprecated Logging, Roots, and Sampling
 //!   features are not implemented yet (see the roadmap).

@@ -13,6 +13,30 @@
 
 ---
 
+## [0.3.0] - 2026-11-12
+
+Confirmation hardening. The ledger of outstanding confirmations now costs the same per call however many it holds, forgets a connection's confirmations when it closes, and has a server-wide cap; an oversized confirm-tier call is refused without building its shown form; and the policy now sees a confirmation's retry and can deny it. The minor version moves because a policy is now consulted twice for a confirmed call.
+
+### Added
+
+- `Server::with_max_total_confirmations`: outstanding confirmations across the whole server (default 4096). Past it, a call that needs a confirmation is answered with a tool error and does not run. A connection at its own quota (`with_max_pending_confirmations`, 64) still replaces its oldest, so it is never refused by this cap.
+- `PermissionRequest::is_retry`: whether the call is a 2026-07-28 retry carrying a confirmation's `requestState`.
+- A "Prompt injection" section in the `permission` module docs and the README: confirmation arguments are written by the model, and tool results reach the model as untrusted input.
+
+### Changed
+
+- The policy is consulted on a confirmation's retry too. `Deny` stops the retry, so a policy switched off after the question was asked still applies; `Allow` and `Confirm` let it redeem its confirmation. A policy that counts calls can skip retries with `is_retry` to count a confirmed call once (the `Policy` example does).
+- A connection's outstanding confirmations are forgotten when it closes. A retry may still arrive on another connection while the one that asked is open.
+- A confirm-tier call whose arguments are too large to show is refused with "more than N bytes as shown" instead of the exact size.
+- Confirmation tokens are the keyed SipHash of a counter under a key fixed once per process, and the argument digest uses a second key; each key is seeded on a thread of its own, so the two are unrelated. Tokens no longer mix in the clock.
+
+### Fixed
+
+- The confirmation ledger was one list scanned in full, under the server-wide lock, on every confirmation and every retry, and a closed connection's entries stayed until they expired (10 minutes by default). With many connections over `Server::connect`, each confirmation cost more than the last and memory grew with every connection opened. Entries are now found by a keyed digest of their token (still compared in constant time), expire and are evicted from the front of an issue order, and go with their connection.
+- A confirm-tier call wrote its whole arguments out and escaped them before the 4 KiB display limit was checked, so an argument of several MiB cost about nine times its size in memory before the call was refused. The shown form is now built piece by piece and given up as soon as it passes the limit, and a string longer than the limit is never escaped.
+
+---
+
 ## [0.2.0] — 2026-10-19
 
 The foundation: an MCP server framework for tools, on MCP 2026-07-28 with the 2025-11-25 and 2025-06-18 handshake revisions on the same connection, a first-party JSON Schema validator, permission tiers enforced through the protocol's own confirmation mechanism, and the stdio transport over rpc-io 0.4. The design follows the 2026-10-14 baseline audit; its decisions and waivers are recorded in `dev/DIRECTIVES.md` §5.
@@ -72,6 +96,7 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/mcp-io/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jamesgober/mcp-io/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/mcp-io/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/mcp-io/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jamesgober/mcp-io/commit/a85830e0b044a1b14c52efbcfc57e496c5f4d3ae

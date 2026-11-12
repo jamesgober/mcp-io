@@ -41,24 +41,57 @@
 //! as shown, and an expiry. Nothing in the token itself is trusted. A
 //! tampered or replayed token names no entry and is refused (tokens are
 //! compared in constant time); an entry is
-//! removed when it is presented, so each confirmation runs at most one call;
-//! entries expire (10 minutes by default) and are capped per connection. The
-//! digest's keys are random per server, so a client cannot search for other
-//! arguments with the same digest. On stdio
-//! there is no authenticated principal to bind; the token is the capability,
-//! and it is sent only to the client that made the call. Tokens come from
-//! the standard library's randomly seeded SipHash keys (seeded from the
-//! operating system's entropy), not from a dedicated CSPRNG API.
+//! removed when it is presented, so each confirmation runs at most one call.
+//! Entries expire (10 minutes by default), are capped per connection (64 by
+//! default, the oldest forgotten past it) and in all (4096 by default, new
+//! confirmations refused past it), and are forgotten when the connection
+//! they were issued on closes. Every operation on them costs the same
+//! however many there are.
+//!
+//! The retry is decided again: the policy sees it (with
+//! [`PermissionRequest::is_retry`]), and a [`Decision::Deny`] stops it, so
+//! a policy changed after the question was asked still applies. `Allow` and
+//! `Confirm` both let the retry go on to redeem its confirmation.
+//!
+//! On stdio there is no authenticated principal to bind; the token is the
+//! capability, and it is sent only to the client that made the call.
+//!
+//! Tokens are the keyed SipHash of a counter that never repeats, and the
+//! digest is a keyed SipHash of the arguments, so a client can neither
+//! predict a token nor search for other arguments with the same digest. The
+//! keys are fixed once per process, each taken from the standard library's
+//! hash seed on a thread of its own, which the standard library draws from
+//! the operating system's random source. This is not a dedicated CSPRNG
+//! API: the standard library does not promise how it derives those keys.
+//!
+//! # Prompt injection
+//!
+//! The arguments in a confirmation are written by the model, not by the
+//! server, and a model can be talked into writing anything. The question
+//! shows the tool's own wording, then the tool's name and tier,
+//! then the arguments as data (escaped, in full, after `Arguments:`), but a
+//! user who skims can still read an argument such as
+//! `"prod (dry run, nothing is deleted)"` as the server's own words. Keep
+//! the [`Tool::confirmation`](crate::Tool::confirmation) question about
+//! what the tool does, so it never depends on the arguments to be safe.
+//!
+//! In the other direction, a tool's results go to the model as they are.
+//! A tool that relays text from outside (web pages, files, issues, mail)
+//! hands the model untrusted input that may carry instructions. This crate
+//! does not mark or filter it: that is the host's job. Mark relayed content
+//! for what it is (for example with `annotations.audience`, or a wrapper
+//! that says where the text came from), and keep the policy and the tiers,
+//! not the model's judgment, between the model and anything destructive.
 
 use std::{
     borrow::Cow,
-    collections::hash_map::RandomState,
+    collections::{HashMap, VecDeque, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
     sync::{
-        Mutex, PoisonError,
+        Mutex, OnceLock, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use crate::{Tier, jsonx::Value, protocol::Era};
@@ -107,6 +140,7 @@ pub struct PermissionRequest<'a> {
     pub(crate) arguments: &'a Value<'a>,
     pub(crate) client_info: Option<&'a Value<'a>>,
     pub(crate) era: Era,
+    pub(crate) retry: bool,
 }
 
 impl<'a> PermissionRequest<'a> {
@@ -141,6 +175,31 @@ impl<'a> PermissionRequest<'a> {
     pub fn era(&self) -> Era {
         self.era
     }
+
+    /// Whether this is a 2026-07-28 retry: the call again, carrying the
+    /// `requestState` of a confirmation the server asked for. A policy that
+    /// counts calls can skip retries, so a confirmed call counts once.
+    /// [`Decision::Deny`] stops a retry; `Allow` and `Confirm` let it go on
+    /// to its confirmation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcp_io::{Decision, PermissionRequest};
+    ///
+    /// let policy = |request: &PermissionRequest<'_>| {
+    ///     if request.is_retry() {
+    ///         // Already counted when the confirmation was asked for.
+    ///         return Decision::Allow;
+    ///     }
+    ///     Decision::Confirm
+    /// };
+    /// # let _ = policy;
+    /// ```
+    #[must_use]
+    pub fn is_retry(&self) -> bool {
+        self.retry
+    }
 }
 
 /// The host's say over every tool call, consulted after validation and
@@ -151,10 +210,13 @@ impl<'a> PermissionRequest<'a> {
 /// with a retry hint is how). A closure `Fn(&PermissionRequest) -> Decision`
 /// is a policy. A policy that panics denies the call.
 ///
-/// It is consulted once per call. On 2026-07-28 a confirmed call arrives
+/// It is consulted for every call. On 2026-07-28 a confirmed call arrives
 /// twice (the call, then its retry with the `requestState` and the user's
-/// answer); the policy decides the first, and the retry is not decided
-/// again: it runs only if it redeems the confirmation the first one issued.
+/// answer), and the policy sees both: the retry with
+/// [`PermissionRequest::is_retry`] set. A [`Decision::Deny`] stops the
+/// retry, so a policy changed after the question was asked still applies;
+/// `Allow` and `Confirm` let the retry go on, and it runs only if it redeems
+/// the confirmation the first call issued.
 ///
 /// # Examples
 ///
@@ -163,12 +225,13 @@ impl<'a> PermissionRequest<'a> {
 /// use mcp_io::{Decision, PermissionRequest, Policy, Tier};
 ///
 /// /// Read-only tools run; at most 100 other calls are allowed, each confirmed
-/// /// (one asked for and declined counts too).
+/// /// (one asked for and declined counts too, and a retry is not counted
+/// /// again).
 /// struct Budgeted { left: Mutex<u32> }
 ///
 /// impl Policy for Budgeted {
 ///     fn decide(&self, request: &PermissionRequest<'_>) -> Decision {
-///         if request.tier() == Tier::ReadOnly {
+///         if request.tier() == Tier::ReadOnly || request.is_retry() {
 ///             return Decision::Allow;
 ///         }
 ///         let mut left = self.left.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -241,8 +304,12 @@ pub(crate) fn effective(tier: Tier, decision: Decision) -> Decision {
 /// A confirmation the server issued and has not seen used.
 struct Pending {
     token: String,
-    /// The connection it was issued on, for its quota (it may be redeemed on
-    /// any connection: MCP does not tie requests to connections).
+    /// Its place in issue order, which is also expiry order: every entry of
+    /// a ledger has the same lifetime.
+    seq: u64,
+    /// The connection it was issued on, for its quota. It may be redeemed
+    /// on any open connection (MCP does not tie requests to connections),
+    /// and it is forgotten when the connection it was issued on closes.
     connection: u64,
     binding: Binding,
     /// `None`: a timeout too large to add to the clock; it never expires.
@@ -271,74 +338,223 @@ pub(crate) enum Redeem {
     Mismatch,
 }
 
-/// The server's outstanding confirmations, shared by every connection.
-pub(crate) struct Ledger {
-    pending: Mutex<Vec<Pending>>,
-    /// Outstanding confirmations per connection.
-    capacity: usize,
-    ttl: Duration,
-    /// The digest's keys: random per ledger, so a client cannot search for
-    /// other arguments with the same digest.
-    keys: [RandomState; 2],
+/// Why a confirmation was not issued.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// The server holds as many outstanding confirmations as it may.
+    Full,
+    /// The connection the call came in on has closed.
+    Closed,
 }
 
-impl Ledger {
-    pub(crate) fn new(capacity: usize, ttl: Duration) -> Self {
-        Self {
-            pending: Mutex::new(Vec::new()),
-            capacity: capacity.max(1),
-            ttl,
-            keys: [RandomState::new(), RandomState::new()],
+/// A place in an issue order: an entry's `seq` and its key. A place whose
+/// entry has since gone (redeemed, evicted, or expired) is stale; stale
+/// places are skipped when met and swept out once they outnumber the live
+/// ones, so every operation costs O(1) amortized.
+type Place = (u64, u128);
+
+/// Stale places tolerated beyond the live count before a sweep.
+const SLACK: usize = 32;
+
+/// One open connection's confirmations.
+#[derive(Default)]
+struct Issued {
+    /// Its places, in issue order.
+    order: VecDeque<Place>,
+    /// How many of them are live.
+    live: usize,
+}
+
+/// The ledger's state, behind its lock.
+#[derive(Default)]
+struct Inner {
+    /// Live entries, by a keyed digest of their token.
+    entries: HashMap<u128, Pending>,
+    /// Every entry's place, in issue (and so expiry) order.
+    order: VecDeque<Place>,
+    /// Open connections. A confirmation is issued only on one of these.
+    connections: HashMap<u64, Issued>,
+    next: u64,
+}
+
+impl Inner {
+    fn is_live(entries: &HashMap<u128, Pending>, (seq, key): Place) -> bool {
+        entries.get(&key).is_some_and(|p| p.seq == seq)
+    }
+
+    /// Removes the entry `key` names, keeping its connection's count.
+    fn take(&mut self, key: u128) -> Option<Pending> {
+        let entry = self.entries.remove(&key)?;
+        if let Some(issued) = self.connections.get_mut(&entry.connection) {
+            issued.live = issued.live.saturating_sub(1);
+        }
+        Some(entry)
+    }
+
+    /// Drops the expired entries, which are the oldest, and sweeps stale
+    /// places out of the issue order once there are enough of them.
+    fn expire(&mut self, now: Instant) {
+        while let Some(&(seq, key)) = self.order.front() {
+            let expired = match self.entries.get(&key) {
+                Some(p) if p.seq == seq => p.expires.is_some_and(|at| at <= now),
+                // Stale: skip it.
+                _ => true,
+            };
+            if !expired {
+                // The oldest live entry has not expired, so none has.
+                break;
+            }
+            if Self::is_live(&self.entries, (seq, key)) {
+                let _expired = self.take(key);
+            }
+            let _done = self.order.pop_front();
+        }
+        if self.order.len() > self.entries.len().saturating_mul(2) + SLACK {
+            let entries = &self.entries;
+            self.order.retain(|&place| Self::is_live(entries, place));
         }
     }
 
-    fn bind(&self, tool: &str, generation: u64, arguments: &str) -> Binding {
-        let digest = self.keys.each_ref().map(|key| {
-            let mut hasher = key.build_hasher();
-            hasher.write(arguments.as_bytes());
-            hasher.finish()
-        });
+    /// Removes `connection`'s oldest live entry.
+    fn evict_oldest(&mut self, connection: u64) {
+        loop {
+            let Some(place) = self
+                .connections
+                .get_mut(&connection)
+                .and_then(|issued| issued.order.pop_front())
+            else {
+                return;
+            };
+            if Self::is_live(&self.entries, place) {
+                let _evicted = self.take(place.1);
+                return;
+            }
+        }
+    }
+}
+
+/// The server's outstanding confirmations, shared by every connection.
+///
+/// Entries are found by a keyed digest of their token, so issuing,
+/// redeeming, expiring, and evicting cost O(1) amortized whatever the
+/// number of entries; a connection's entries go when it closes.
+pub(crate) struct Ledger {
+    inner: Mutex<Inner>,
+    /// Outstanding confirmations per connection.
+    capacity: usize,
+    /// Outstanding confirmations in all.
+    total: usize,
+    ttl: Duration,
+}
+
+impl Ledger {
+    pub(crate) fn new(capacity: usize, total: usize, ttl: Duration) -> Self {
+        Self {
+            inner: Mutex::new(Inner::default()),
+            capacity: capacity.max(1),
+            total: total.max(1),
+            ttl,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn bind(tool: &str, generation: u64, arguments: &str) -> Binding {
         Binding {
             tool: tool.into(),
             generation,
-            digest,
+            digest: digest(&keys().digest, b'a', arguments.as_bytes()),
             length: arguments.len(),
         }
+    }
+
+    /// Where a token's entry is kept: a keyed digest of the token, so the
+    /// lookup's timing says nothing about the tokens held.
+    fn key(token: &str) -> u128 {
+        let [high, low] = digest(&keys().digest, b'k', token.as_bytes());
+        (u128::from(high) << 64) | u128::from(low)
+    }
+
+    /// Starts keeping confirmations for `connection`.
+    pub(crate) fn open(&self, connection: u64) {
+        let _opened = self.lock().connections.entry(connection).or_default();
+    }
+
+    /// Forgets `connection` and every confirmation issued on it.
+    pub(crate) fn close(&self, connection: u64) {
+        let mut inner = self.lock();
+        if let Some(issued) = inner.connections.remove(&connection) {
+            for place in issued.order {
+                if Inner::is_live(&inner.entries, place) {
+                    let _forgotten = inner.entries.remove(&place.1);
+                }
+            }
+        }
+        inner.expire(Instant::now());
     }
 
     /// Records a confirmation for registration `generation` of `tool` with
     /// `arguments` (as shown), issued on `connection`, and returns its
     /// token. Expired entries go first; past the connection's quota, its
-    /// oldest entry goes, so one connection cannot evict another's.
+    /// oldest entry goes, so one connection cannot evict another's; past
+    /// the server's total, nothing is issued.
     pub(crate) fn issue(
         &self,
         connection: u64,
         tool: &str,
         generation: u64,
         arguments: &str,
-    ) -> String {
-        let token = token();
-        let binding = self.bind(tool, generation, arguments);
+    ) -> Result<String, Refused> {
+        let mut token = token();
+        let binding = Self::bind(tool, generation, arguments);
+        let mut inner = self.lock();
+        // The clock is read under the lock, so issue order is expiry order.
         let now = Instant::now();
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        pending.retain(|p| p.expires.is_none_or(|at| at > now));
-        let mine = pending
-            .iter()
-            .filter(|p| p.connection == connection)
-            .count();
-        if mine >= self.capacity {
-            // Entries share one TTL, so this connection's first is its oldest.
-            if let Some(oldest) = pending.iter().position(|p| p.connection == connection) {
-                let _evicted = pending.remove(oldest);
+        inner.expire(now);
+        let Some(issued) = inner.connections.get(&connection) else {
+            return Err(Refused::Closed);
+        };
+        if issued.live >= self.capacity {
+            inner.evict_oldest(connection);
+        }
+        if inner.entries.len() >= self.total {
+            return Err(Refused::Full);
+        }
+        let mut key = Self::key(&token);
+        while inner.entries.contains_key(&key) {
+            // Two live tokens with one key: never in practice, but a new
+            // token costs nothing.
+            token = self::token();
+            key = Self::key(&token);
+        }
+        let seq = inner.next;
+        inner.next = seq.wrapping_add(1);
+        let _new = inner.entries.insert(
+            key,
+            Pending {
+                token: token.clone(),
+                seq,
+                connection,
+                binding,
+                expires: now.checked_add(self.ttl),
+            },
+        );
+        inner.order.push_back((seq, key));
+        let Inner {
+            entries,
+            connections,
+            ..
+        } = &mut *inner;
+        if let Some(issued) = connections.get_mut(&connection) {
+            issued.order.push_back((seq, key));
+            issued.live += 1;
+            if issued.order.len() > issued.live.saturating_mul(2) + SLACK {
+                issued.order.retain(|&place| Inner::is_live(entries, place));
             }
         }
-        pending.push(Pending {
-            token: token.clone(),
-            connection,
-            binding,
-            expires: now.checked_add(self.ttl),
-        });
-        token
+        Ok(token)
     }
 
     /// Consumes the confirmation `token` names, if it was issued for
@@ -352,13 +568,21 @@ impl Ledger {
         generation: u64,
         arguments: &str,
     ) -> Result<(), Redeem> {
-        let binding = self.bind(tool, generation, arguments);
+        let binding = Self::bind(tool, generation, arguments);
+        let key = Self::key(token);
         let now = Instant::now();
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(at) = pending.iter().position(|p| same(&p.token, token)) else {
+        let mut inner = self.lock();
+        inner.expire(now);
+        let found = inner
+            .entries
+            .get(&key)
+            .is_some_and(|entry| same(&entry.token, token));
+        if !found {
+            return Err(Redeem::Unknown);
+        }
+        let Some(entry) = inner.take(key) else {
             return Err(Redeem::Unknown);
         };
-        let entry = pending.remove(at);
         if entry.expires.is_some_and(|at| at <= now) {
             return Err(Redeem::Unknown);
         }
@@ -368,12 +592,22 @@ impl Ledger {
         Ok(())
     }
 
+    /// Live entries, and the places the issue orders hold (live and stale).
+    #[cfg(test)]
+    pub(crate) fn sizes(&self) -> (usize, usize) {
+        let inner = self.lock();
+        let places = inner.order.len()
+            + inner
+                .connections
+                .values()
+                .map(|issued| issued.order.len())
+                .sum::<usize>();
+        (inner.entries.len(), places)
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.sizes().0
     }
 }
 
@@ -389,24 +623,53 @@ fn same(issued: &str, presented: &str) -> bool {
     core::hint::black_box(difference) == 0
 }
 
-/// A fresh, unpredictable confirmation token.
+/// The keys behind tokens and digests, made once per process.
+struct Keys {
+    token: RandomState,
+    digest: RandomState,
+}
+
+fn keys() -> &'static Keys {
+    static KEYS: OnceLock<Keys> = OnceLock::new();
+    KEYS.get_or_init(|| Keys {
+        token: fresh_key(),
+        digest: fresh_key(),
+    })
+}
+
+/// SipHash keys unrelated to any other `RandomState`'s. The standard
+/// library seeds each thread's hash keys from the operating system's random
+/// source when that thread first makes a `RandomState`, and later states on
+/// the same thread are derived from that seed; a state made on a thread of
+/// its own therefore has keys of its own. If no thread can be started, the
+/// current thread's next state is used.
+fn fresh_key() -> RandomState {
+    std::thread::Builder::new()
+        .name("mcp-io-seed".to_owned())
+        .spawn(RandomState::new)
+        .ok()
+        .and_then(|seeding| seeding.join().ok())
+        .unwrap_or_default()
+}
+
+/// A 128-bit keyed digest of `bytes` under `key`, separated by `domain`.
+fn digest(key: &RandomState, domain: u8, bytes: &[u8]) -> [u64; 2] {
+    [0u8, 1].map(|half| {
+        let mut hasher = key.build_hasher();
+        hasher.write_u8(domain);
+        hasher.write_u8(half);
+        hasher.write(bytes);
+        hasher.finish()
+    })
+}
+
+/// A fresh, unpredictable confirmation token: 128 bits, the keyed hash of a
+/// counter that never repeats under keys fixed for the process.
 fn token() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let mut out = String::from("mcp-io.confirm.");
-    for half in 0..2u8 {
-        // Every `RandomState` carries its own SipHash keys, derived from
-        // OS-seeded per-thread keys; the output is unpredictable without them.
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u64(count);
-        hasher.write_u128(nanos);
-        hasher.write_u8(half);
-        out.push_str(&format!("{:016x}", hasher.finish()));
-    }
-    out
+    let [high, low] = digest(&keys().token, b't', &count.to_le_bytes());
+    format!("mcp-io.confirm.{high:016x}{low:016x}")
 }
 
 #[cfg(test)]
@@ -422,6 +685,7 @@ mod tests {
             arguments: &arguments,
             client_info: None,
             era: Era::Modern,
+            retry: false,
         };
         assert_eq!((r.tool(), r.tier(), r.era()), ("t", tier, Era::Modern));
         assert!(r.client_info().is_none() && r.arguments().as_object().is_some());
@@ -465,14 +729,30 @@ mod tests {
             arguments: &arguments,
             client_info: None,
             era: Era::Legacy,
+            retry: false,
         };
         assert_eq!(policy.decide(&r), Decision::deny("never"));
     }
 
+    /// A ledger with `connections` open, numbered from 1.
+    fn ledger(capacity: usize, total: usize, ttl: Duration, connections: u64) -> Ledger {
+        let ledger = Ledger::new(capacity, total, ttl);
+        for connection in 1..=connections {
+            ledger.open(connection);
+        }
+        ledger
+    }
+
+    fn issue(ledger: &Ledger, connection: u64, arguments: &str) -> String {
+        ledger
+            .issue(connection, "t", 0, arguments)
+            .unwrap_or_default()
+    }
+
     #[test]
     fn test_ledger_tokens_are_single_use_and_bound_to_the_call() {
-        let ledger = Ledger::new(8, Duration::from_secs(60));
-        let token = ledger.issue(1, "ship", 0, "{}");
+        let ledger = ledger(8, 64, Duration::from_secs(60), 2);
+        let token = ledger.issue(1, "ship", 0, "{}").unwrap_or_default();
         assert!(token.starts_with("mcp-io.confirm.") && token.len() == 15 + 32);
         assert_eq!(ledger.redeem(&token, "ship", 0, "{}"), Ok(()));
         assert_eq!(
@@ -480,7 +760,7 @@ mod tests {
             Err(Redeem::Unknown),
             "replay"
         );
-        let token = ledger.issue(1, "ship", 0, "{\"v\":1}");
+        let token = ledger.issue(1, "ship", 0, "{\"v\":1}").unwrap_or_default();
         assert_eq!(
             ledger.redeem(&token, "ship", 0, "{\"v\":2}"),
             Err(Redeem::Mismatch)
@@ -490,31 +770,41 @@ mod tests {
             Err(Redeem::Unknown),
             "a mismatch burns the token"
         );
-        let token = ledger.issue(1, "ship", 0, "{}");
+        let token = ledger.issue(1, "ship", 0, "{}").unwrap_or_default();
         assert_eq!(
             ledger.redeem(&token, "other", 0, "{}"),
             Err(Redeem::Mismatch)
         );
-        let token = ledger.issue(1, "ship", 0, "{}");
+        let token = ledger.issue(1, "ship", 0, "{}").unwrap_or_default();
         assert_eq!(
             ledger.redeem(&token, "ship", 1, "{}"),
             Err(Redeem::Mismatch),
             "a tool registered again under the same name"
         );
-        // Redeemable from another connection: MCP ties nothing to one.
-        let token = ledger.issue(1, "ship", 0, "{}");
+        // Redeemable from another open connection: MCP ties nothing to one.
+        let token = ledger.issue(2, "ship", 0, "{}").unwrap_or_default();
         assert_eq!(ledger.redeem(&token, "ship", 0, "{}"), Ok(()));
         assert_eq!(
             ledger.redeem("mcp-io.confirm.forged", "ship", 0, "{}"),
             Err(Redeem::Unknown)
         );
+        // A token one character off names no entry, and burns nothing.
+        let token = issue(&ledger, 1, "{}");
+        let mut altered = token.clone().into_bytes();
+        if let Some(byte) = altered.last_mut() {
+            *byte = if *byte == b'0' { b'1' } else { b'0' };
+        }
+        let altered = String::from_utf8(altered).unwrap_or_default();
+        assert_eq!(ledger.redeem(&altered, "t", 0, "{}"), Err(Redeem::Unknown));
+        assert_eq!(ledger.redeem(&token, "t", 0, "{}"), Ok(()));
+        assert_eq!(ledger.len(), 0);
     }
 
     #[test]
     fn test_ledger_keeps_a_digest_not_the_arguments() {
-        let ledger = Ledger::new(8, Duration::from_secs(60));
+        let ledger = ledger(8, 64, Duration::from_secs(60), 1);
         let big = "x".repeat(1 << 20);
-        let token = ledger.issue(1, "ship", 0, &big);
+        let token = ledger.issue(1, "ship", 0, &big).unwrap_or_default();
         let size = core::mem::size_of::<Pending>();
         assert!(
             size < 256,
@@ -530,21 +820,25 @@ mod tests {
 
     #[test]
     fn test_ledger_expiry_and_per_connection_quota() {
-        let expired = Ledger::new(8, Duration::ZERO);
-        let token = expired.issue(1, "t", 0, "{}");
+        let expired = ledger(8, 64, Duration::ZERO, 1);
+        let token = issue(&expired, 1, "{}");
         assert_eq!(expired.redeem(&token, "t", 0, "{}"), Err(Redeem::Unknown));
-        let forever = Ledger::new(8, Duration::MAX);
-        let token = forever.issue(1, "t", 0, "{}");
+        for _ in 0..1000 {
+            let _token = issue(&expired, 1, "{}");
+        }
+        assert!(expired.len() <= 1, "expired entries go as new ones come");
+        let forever = ledger(8, 64, Duration::MAX, 1);
+        let token = issue(&forever, 1, "{}");
         assert_eq!(
             forever.redeem(&token, "t", 0, "{}"),
             Ok(()),
             "a timeout too large to add never expires"
         );
-        let small = Ledger::new(2, Duration::from_secs(60));
-        let others = small.issue(2, "t", 0, "{}");
-        let first = small.issue(1, "t", 0, "{}");
-        let _second = small.issue(1, "t", 0, "{}");
-        let _third = small.issue(1, "t", 0, "{}");
+        let small = ledger(2, 64, Duration::from_secs(60), 2);
+        let others = issue(&small, 2, "{}");
+        let first = issue(&small, 1, "{}");
+        let _second = issue(&small, 1, "{}");
+        let _third = issue(&small, 1, "{}");
         assert_eq!(small.len(), 3);
         assert_eq!(
             small.redeem(&first, "t", 0, "{}"),
@@ -555,6 +849,107 @@ mod tests {
             small.redeem(&others, "t", 0, "{}"),
             Ok(()),
             "another connection's entry stays"
+        );
+    }
+
+    #[test]
+    fn test_ledger_forgets_a_closed_connections_entries() {
+        let ledger = ledger(64, 1 << 20, Duration::from_secs(600), 2);
+        let kept = issue(&ledger, 2, "{}");
+        for connection in 3..103 {
+            ledger.open(connection);
+            for n in 0..64 {
+                let _token = issue(&ledger, connection, &format!("{{\"n\":{n}}}"));
+            }
+        }
+        let closing = issue(&ledger, 1, "{}");
+        assert_eq!(ledger.len(), 1 + 100 * 64 + 1);
+        for connection in 3..103 {
+            ledger.close(connection);
+        }
+        ledger.close(1);
+        assert_eq!(ledger.len(), 1, "only the open connection's entry is left");
+        assert_eq!(
+            ledger.redeem(&closing, "t", 0, "{}"),
+            Err(Redeem::Unknown),
+            "forgotten with its connection"
+        );
+        assert_eq!(
+            ledger.issue(1, "t", 0, "{}"),
+            Err(Refused::Closed),
+            "a call still running when its connection closed adds nothing"
+        );
+        assert_eq!(ledger.redeem(&kept, "t", 0, "{}"), Ok(()));
+        let (entries, places) = ledger.sizes();
+        assert_eq!(entries, 0);
+        assert!(places <= 2 * SLACK, "{places} places left over");
+    }
+
+    #[test]
+    fn test_ledger_total_cap_refuses_new_confirmations() {
+        let ledger = ledger(2, 3, Duration::from_secs(600), 3);
+        let a = issue(&ledger, 1, "{}");
+        let _b = issue(&ledger, 1, "{}");
+        let _c = issue(&ledger, 2, "{}");
+        assert_eq!(ledger.issue(3, "t", 0, "{}"), Err(Refused::Full));
+        assert_eq!(ledger.issue(2, "t", 0, "{}"), Err(Refused::Full));
+        assert_eq!(ledger.len(), 3);
+        // A connection at its own quota replaces its oldest instead.
+        assert!(ledger.issue(1, "t", 0, "{}").is_ok());
+        assert_eq!(ledger.redeem(&a, "t", 0, "{}"), Err(Redeem::Unknown));
+        assert_eq!(ledger.len(), 3);
+        // Room again once one is used, or its connection closes.
+        ledger.close(2);
+        assert!(ledger.issue(3, "t", 0, "{}").is_ok());
+        assert_eq!(ledger.issue(3, "t", 0, "{}"), Err(Refused::Full));
+    }
+
+    #[test]
+    fn test_ledger_bookkeeping_stays_bounded() {
+        // Issued and redeemed in a loop, or evicted by the quota: the issue
+        // orders keep no more than a constant beyond the live entries.
+        let ledger = ledger(4, 1 << 20, Duration::from_secs(600), 2);
+        for n in 0..10_000 {
+            let token = issue(&ledger, 1, "{}");
+            assert_eq!(ledger.redeem(&token, "t", 0, "{}"), Ok(()), "round {n}");
+            let _evicted_later = issue(&ledger, 2, "{}");
+        }
+        let (entries, places) = ledger.sizes();
+        assert_eq!(entries, 4);
+        assert!(places <= 3 * (entries * 2 + SLACK), "{places} places");
+    }
+
+    #[test]
+    fn test_ledger_cost_does_not_grow_with_its_size() {
+        // The same work (issue and redeem a confirmation, 2,000 times) on an
+        // empty ledger and on one holding 20,000 entries from 313 other
+        // connections. With a scan of every entry per operation the second
+        // takes hundreds of times longer; with the index, about as long.
+        // The bound is coarse so a loaded machine cannot fail it.
+        fn work(ledger: &Ledger) -> Duration {
+            let start = Instant::now();
+            for _ in 0..2000 {
+                let token = issue(ledger, 1, "{}");
+                assert_eq!(ledger.redeem(&token, "t", 0, "{}"), Ok(()));
+            }
+            start.elapsed()
+        }
+        let best = |ledger: &Ledger| (0..3).map(|_| work(ledger)).min().unwrap_or_default();
+        let empty = ledger(64, 1 << 20, Duration::from_secs(600), 1);
+        let full = ledger(64, 1 << 20, Duration::from_secs(600), 1);
+        for connection in 2..=314 {
+            full.open(connection);
+            for n in 0..64 {
+                if full.len() < 20_000 {
+                    let _token = issue(&full, connection, &format!("{n}"));
+                }
+            }
+        }
+        assert_eq!(full.len(), 20_000);
+        let (small, large) = (best(&empty), best(&full));
+        assert!(
+            large < small * 20 + Duration::from_millis(100),
+            "{large:?} with 20,000 entries against {small:?} with none"
         );
     }
 

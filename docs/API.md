@@ -1,7 +1,7 @@
 # mcp-io &mdash; API Reference
 
 > Complete reference for every public item in `mcp-io`; each section has an example.
-> **Status: pre-1.0 (0.2.0).** The surface is refined across the 0.x series and
+> **Status: pre-1.0 (0.3.0).** The surface is refined across the 0.x series and
 > frozen at `1.0.0`, after LexerSketch's `ls-mcp` has run on it (decision D18).
 > See [`../dev/ROADMAP.md`](../dev/ROADMAP.md).
 
@@ -141,7 +141,8 @@ unless the host replaces the hook.
 | `with_drain_timeout(self, Duration)` | How long the end of input waits for running calls (default 10 s). |
 | `with_confirmation_timeout(self, Duration)` | A `requestState`'s life, and a legacy elicitation's wait (default 10 min). |
 | `with_max_confirmed_arguments(self, bytes)` | The largest arguments, as shown, a confirm-tier call may have (default 4 KiB); larger calls are refused, never shown in part. |
-| `with_max_pending_confirmations(self, n)` | Outstanding confirmations kept per connection (default 64; the connection's oldest is forgotten). |
+| `with_max_pending_confirmations(self, n)` | Outstanding confirmations kept per connection (default 64; the connection's oldest is forgotten; all of them when it closes). |
+| `with_max_total_confirmations(self, n)` | Outstanding confirmations kept across the server (default 4096; past it, new ones are refused with a tool error). |
 | `with_limits(self, rpc_io::Limits)` | Message budgets (default `Limits::mcp()`; batches stay off). |
 | `with_schema_limits(self, SchemaLimits)` | Budgets for schemas registered from now on. |
 | `connect<K: Sink>(&self, sink) -> Result<Connection<K>, Error>` | A connection sending through `sink`. |
@@ -418,11 +419,17 @@ arguments exceed `Server::with_max_confirmed_arguments` (4 KiB) is refused
 with a tool error instead. The server keeps only a keyed digest of the arguments, so a
 pending confirmation costs the same whatever their size; each connection may
 hold `with_max_pending_confirmations` (64) of them, its oldest forgotten
-first. The client retries the call (a new id, the same name and
-arguments) with that `requestState` and `inputResponses.confirm =
+first, and the server as a whole `with_max_total_confirmations` (4096),
+past which a new confirmation is refused with a tool error. A connection's
+confirmations are forgotten when it closes. The client retries the call
+(a new id, the same name and arguments) with that `requestState` and
+`inputResponses.confirm =
 {"action": "accept", "content": {"confirm": true}}`; the tool then runs.
-The policy is not consulted for the retry: it decided the call when the
-confirmation was asked for, so a policy that counts calls counts it once.
+The policy is consulted for the retry too, with
+`PermissionRequest::is_retry()` set: `Deny` stops it (so a policy changed
+since the question was asked still applies), and `Allow` or `Confirm` lets
+it redeem its confirmation. A policy that counts calls can skip retries,
+so it counts a confirmed call once.
 `decline`, `cancel`, or `confirm: false` is a tool error; a retry without an
 answer is asked again. A `requestState` names a server-side entry bound to
 the tool's registration (a tool removed and registered again does not
@@ -436,7 +443,7 @@ elicitation is withdrawn, and nothing is sent for the call. A client that
 declared no elicitation gets a tool error.
 
 `PermissionRequest`: `tool()`, `tier()`, `arguments()`, `client_info()`
-(self-reported; never for security), `era()`. `Ceiling(tier)` allows tiers up
+(self-reported; never for security), `era()`, `is_retry()`. `Ceiling(tier)` allows tiers up
 to `tier` and confirms above (default `Ceiling(Tier::Mutating)`). A closure
 `Fn(&PermissionRequest) -> Decision` is a `Policy`.
 
@@ -444,6 +451,14 @@ The gate guarantees that a denied call never runs, that a confirm-tier call
 runs only with a confirmation the server issued for that tool and those
 arguments, and that each confirmation runs one call. It cannot prove a
 person answered: the client relays the answer. It is not a sandbox.
+
+Prompt injection: the arguments in a confirmation are model-written data,
+shown escaped and in full after the tool's own question; keep that question
+about what the tool does, since an argument can be written to read as
+reassurance. Tool results reach the model as they are, so a tool that
+relays outside text hands the model untrusted input; mark it for what it is
+(`annotations.audience`, or a wrapper naming its source). See the
+`permission` module docs.
 
 ```rust
 use mcp_io::{Decision, Implementation, PermissionRequest, Server, Tier, Tool, ToolResult};
