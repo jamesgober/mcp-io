@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. One dependency, from the family: <code>rpc-io</code>, which brings <code>jsonx-lib</code> (re-exported here as <code>mcp_io::jsonx</code>).
     </p>
     <blockquote>
-        <strong>Status: pre-1.0.</strong> 0.2.0 is the foundation: tools, the two protocol eras, the permission gate, and the stdio transport. Resources, prompts, and the HTTP transport come later in the 0.x series; the API is frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>.
+        <strong>Status: pre-1.0.</strong> 0.3.0 builds on the 0.2.0 foundation (tools, the two protocol eras, the permission gate, and the stdio transport) with a hardened confirmation path. Resources, prompts, and the HTTP transport come later in the 0.x series; the API is frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> and <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-mcp-io = "0.2"
+mcp-io = "0.3"
 ```
 
 `mcp_io::jsonx` re-exports jsonx-lib (for `json!` and `Value`), and `mcp_io::rpc_io` the engine.
@@ -118,9 +118,15 @@ Every tool declares a tier, and every call passes a gate after validation and be
 | `Destructive` | `destructiveHint: true` | asks the user first |
 | `Publish` | `destructiveHint: true`, `openWorldHint: true` | always asks the user first; no policy can waive it |
 
-The host's `Policy` decides each call once (`Allow`, `Deny` with a reason, or `Confirm`; the retry that carries a confirmation is not decided again); `Ceiling(Tier::Mutating)` is the default. The question shows the call's arguments in full, as the tool receives them, non-ASCII and control characters escaped, and the confirmation is bound to exactly that text, so a retry that spells them otherwise (`1e2` for `100`, another member order) is refused; a call too large to show in full (`Server::with_max_confirmed_arguments`, 4 KiB) is refused, never shown in part. A confirmation uses MCP's own mechanism: on 2026-07-28 the call is answered with an `InputRequiredResult` holding a form `elicitation/create` and a single-use `requestState`, and the tool runs when the client retries with the user's acceptance; on a legacy session the server sends `elicitation/create` and waits. A client that cannot elicit gets `-32021` (or a tool error on a legacy session), and the tool does not run. Every call is reported to `Server::on_audit` (tool, tier, id, client name, outcome; never the arguments).
+The host's `Policy` decides each call (`Allow`, `Deny` with a reason, or `Confirm`); `Ceiling(Tier::Mutating)` is the default. The retry that carries a confirmation is decided again, marked by `PermissionRequest::is_retry`, so a policy switched to `Deny` after the question was asked stops it. The question shows the call's arguments in full, as the tool receives them, non-ASCII and control characters escaped, and the confirmation is bound to exactly that text, so a retry that spells them otherwise (`1e2` for `100`, another member order) is refused; a call too large to show in full (`Server::with_max_confirmed_arguments`, 4 KiB) is refused, never shown in part. A confirmation uses MCP's own mechanism: on 2026-07-28 the call is answered with an `InputRequiredResult` holding a form `elicitation/create` and a single-use `requestState`, and the tool runs when the client retries with the user's acceptance; on a legacy session the server sends `elicitation/create` and waits. A client that cannot elicit gets `-32021` (or a tool error on a legacy session), and the tool does not run. Outstanding confirmations are capped per connection (`with_max_pending_confirmations`, 64, the oldest forgotten) and across the server (`with_max_total_confirmations`, 4096, new ones refused with a tool error), and a connection's go when it closes. Every call is reported to `Server::on_audit` (tool, tier, id, client name, outcome; never the arguments).
 
 What the gate guarantees, and what it does not: a model cannot run a tool the policy denies, cannot run a confirm-tier tool without a confirmation the server issued for that exact tool and those exact arguments, and cannot use one confirmation twice. The answer itself comes through the client, and the server cannot verify that a person, rather than an automated client, gave it. Annotations are hints a client must not trust. A handler that runs has the server process's privileges: the gate is not a sandbox.
+
+### Prompt injection
+
+The arguments shown in a confirmation are written by the model, and the model can be talked into writing anything. They are shown escaped and in full after `Arguments:`, below the tool's own question, but a user who skims can still read an argument such as `"prod (dry run, nothing is deleted)"` as the server speaking. Keep each tool's `confirmation` question about what the tool does, so it never relies on the arguments to be safe.
+
+Tool results go to the model as they are. A tool that relays outside text (web pages, files, issues, mail) hands the model untrusted input that may carry instructions; this crate does not mark or filter it. Mark relayed content for what it is (with `annotations.audience`, or a wrapper that says where the text came from), and let the policy and the tiers, not the model's judgment, stand between the model and anything destructive.
 
 <br>
 

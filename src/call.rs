@@ -18,7 +18,7 @@ use crate::{
     content::ToolErrorKind,
     json::{self, Obj},
     jsonx::{self, Value},
-    permission::{self, Redeem},
+    permission::{self, Redeem, Refused},
     protocol::{self, Era},
     registry::Entry,
     rpc_io::{CallError, CancelToken, ErrorObject, Id, Progress, Raw, Responder},
@@ -231,23 +231,26 @@ fn execute(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> (Ou
             Answer::Result(tool_error(job, message)),
         );
     }
+    // A 2026-07-28 retry carries the `requestState` of a confirmation the
+    // server asked for. The policy is consulted again, so a call it now
+    // denies (a policy changed meanwhile) does not run; otherwise the retry
+    // goes to the confirmation, which runs it only if the ledger holds that
+    // state for this tool and these arguments.
+    let retry = job.era == Era::Modern && params.get("requestState").is_some();
     let request = PermissionRequest {
         tool: &job.entry.name,
         tier: job.entry.tier,
         arguments,
         client_info: job.client_info.as_ref(),
         era: job.era,
+        retry,
     };
-    // The policy decides a call once. A 2026-07-28 retry that carries a
-    // `requestState` was decided when the confirmation was asked for: it
-    // goes to the confirmation, which runs it only if the ledger holds that
-    // state for this tool and these arguments.
-    let retry = job.era == Era::Modern && params.get("requestState").is_some();
-    let decision = if retry {
-        Decision::Confirm
-    } else {
-        catch_unwind(AssertUnwindSafe(|| job.shared.policy.decide(&request)))
-            .unwrap_or_else(|_| Decision::deny("the server's permission policy failed"))
+    let decision = catch_unwind(AssertUnwindSafe(|| job.shared.policy.decide(&request)))
+        .unwrap_or_else(|_| Decision::deny("the server's permission policy failed"));
+    let decision = match decision {
+        // `Allow` and `Confirm` on a retry both mean: redeem the confirmation.
+        Decision::Allow | Decision::Confirm if retry => Decision::Confirm,
+        other => other,
     };
     match permission::effective(job.entry.tier, decision) {
         Decision::Allow => {}
@@ -342,40 +345,125 @@ fn tool_error(job: &Prepared<'_>, message: String) -> String {
 /// arguments differently (`1e2` for `100`, another member order) is
 /// refused rather than run with a spelling the user did not see. Arguments
 /// whose shown form would exceed `Server::with_max_confirmed_arguments`
-/// are refused instead of shortened.
+/// are refused instead of shortened, and the shown form is built only up
+/// to that limit, so a refusal costs no more than the limit allows.
 fn confirm(job: &Prepared<'_>, params: &Value<'_>, arguments: &Value<'_>) -> Confirmation {
-    let refuse = |message: String| {
-        Confirmation::Stop(
+    let limit = job.shared.settings.max_confirmed_arguments;
+    let Some(shown) = shown_arguments(arguments, limit) else {
+        let message = format!(
+            "This call needs the user's confirmation, and its arguments are more than {limit} \
+             bytes as shown, too large to show in full (the limit is {limit} bytes); the tool \
+             was not run. Call it again with smaller arguments."
+        );
+        return Confirmation::Stop(
             Outcome::NotConfirmed,
             Answer::Result(tool_error(job, message)),
-        )
+        );
     };
-    let mut received = String::new();
-    crate::jsonx::write_value(&mut received, arguments);
-    let shown = shown_arguments(&received);
-    let limit = job.shared.settings.max_confirmed_arguments;
-    if shown.len() > limit {
-        return refuse(format!(
-            "This call needs the user's confirmation, and its arguments ({} bytes as shown) are \
-             too large to show in full (the limit is {limit} bytes); the tool was not run. \
-             Call it again with smaller arguments.",
-            shown.len()
-        ));
-    }
     match job.era {
         Era::Modern => confirm_modern(job, params, shown),
         Era::Legacy => confirm_legacy(job, &shown),
     }
 }
 
-/// `json` (JSON text) with every non-ASCII character and every ASCII
-/// control character (DEL; the JSON writer escapes the others already)
-/// written as a `\uXXXX` escape: the same JSON value, in text a person can
-/// read unambiguously. Controls appear only inside strings, where the
-/// escape is valid JSON.
-pub(crate) fn shown_arguments(json: &str) -> String {
+/// `arguments` as compact JSON (as `jsonx::write_value` writes it: members
+/// in the order sent, numbers as spelled) with every non-ASCII character
+/// and every ASCII control character (DEL; the JSON writer escapes the
+/// others already) written as a `\uXXXX` escape: the same JSON value, in
+/// text a person can read unambiguously. Controls appear only inside
+/// strings, where the escape is valid JSON.
+///
+/// `None` once the text would pass `limit` bytes. It is written piece by
+/// piece and given up as soon as it passes, and a string whose raw length
+/// alone would pass the limit is not escaped at all (escaping never
+/// shortens text), so the work and memory spent are bounded by the limit,
+/// not by the size of the arguments.
+pub(crate) fn shown_arguments(arguments: &Value<'_>, limit: usize) -> Option<String> {
+    /// An array or object being written, and whether it has had a member.
+    enum Open<'v, 'a> {
+        Array(core::slice::Iter<'v, Value<'a>>, bool),
+        Object(jsonx::Iter<'v, 'a>, bool),
+    }
+    let mut out = String::new();
+    // One string at a time, as the JSON writer writes it, before escaping.
+    let mut scratch = String::new();
+    let mut text = |out: &mut String, text: &str| -> Option<()> {
+        // The shown form of a string is at least its length plus quotes.
+        if out.len().saturating_add(text.len()).saturating_add(2) > limit {
+            return None;
+        }
+        scratch.clear();
+        jsonx::write_string(&mut scratch, text);
+        push_shown(out, &scratch);
+        (out.len() <= limit).then_some(())
+    };
+    let mut stack: Vec<Open<'_, '_>> = Vec::new();
+    let mut next = Some(arguments);
+    loop {
+        if let Some(value) = next.take() {
+            match value {
+                Value::Null => out.push_str("null"),
+                Value::Bool(true) => out.push_str("true"),
+                Value::Bool(false) => out.push_str("false"),
+                Value::Number(n) => {
+                    if out.len().saturating_add(n.as_str().len()) > limit {
+                        return None;
+                    }
+                    push_shown(&mut out, n.as_str());
+                }
+                Value::String(s) => text(&mut out, s)?,
+                Value::Array(a) => {
+                    out.push('[');
+                    stack.push(Open::Array(a.iter(), false));
+                }
+                Value::Object(o) => {
+                    out.push('{');
+                    stack.push(Open::Object(o.iter(), false));
+                }
+            }
+            if out.len() > limit {
+                return None;
+            }
+        }
+        let Some(open) = stack.last_mut() else {
+            return Some(out);
+        };
+        let (child, key, started) = match open {
+            Open::Array(items, started) => (items.next(), None, started),
+            Open::Object(members, started) => match members.next() {
+                Some((key, value)) => (Some(value), Some(key), started),
+                None => (None, None, started),
+            },
+        };
+        let Some(child) = child else {
+            let close = if matches!(open, Open::Array(..)) {
+                ']'
+            } else {
+                '}'
+            };
+            let _closed = stack.pop();
+            out.push(close);
+            if out.len() > limit {
+                return None;
+            }
+            continue;
+        };
+        if *started {
+            out.push(',');
+        }
+        *started = true;
+        if let Some(key) = key {
+            text(&mut out, key)?;
+            out.push(':');
+        }
+        next = Some(child);
+    }
+}
+
+/// Appends `json` to `out` with every non-ASCII and control character
+/// written as a `\uXXXX` escape (see [`shown_arguments`]).
+fn push_shown(out: &mut String, json: &str) {
     use core::fmt::Write as _;
-    let mut out = String::with_capacity(json.len());
     for c in json.chars() {
         if c.is_ascii() && !c.is_ascii_control() {
             out.push(c);
@@ -386,7 +474,6 @@ pub(crate) fn shown_arguments(json: &str) -> String {
             }
         }
     }
-    out
 }
 
 /// 2026-07-28: answer with an `InputRequiredResult`, or run on a retry that
@@ -434,10 +521,25 @@ fn confirm_modern(job: &Prepared<'_>, params: &Value<'_>, shown: String) -> Conf
         return stop_error(protocol::missing_capability(&required));
     }
     let message = question(job, &shown);
-    let token = job
+    let issued = job
         .shared
         .ledger
         .issue(job.connection, name, job.entry.generation, &shown);
+    let token = match issued {
+        Ok(token) => token,
+        Err(Refused::Full) => {
+            let message = "This call needs the user's confirmation, and the server has too many \
+                           confirmations waiting for an answer; the tool was not run. Try again \
+                           later."
+                .to_owned();
+            return Confirmation::Stop(
+                Outcome::NotConfirmed,
+                Answer::Result(tool_error(job, message)),
+            );
+        }
+        // The connection has closed: no one is left to answer.
+        Err(Refused::Closed) => return Confirmation::Stop(Outcome::Cancelled, Answer::Nothing),
+    };
     let mut o = Obj::with_capacity(message.len() + 512);
     let _ = o
         .with("inputRequests", |out| {
@@ -562,7 +664,6 @@ fn read_answer(response: Option<&Value<'_>>) -> Answer3 {
     }
 }
 
-/// The question put to the user: the tool's own wording, then what will run.
 /// The question put to the user: the tool's own wording, then exactly what
 /// will run (`shown`: the full arguments, see [`confirm`]).
 fn question(job: &Prepared<'_>, shown: &str) -> String {
@@ -887,18 +988,78 @@ mod tests {
         assert!(matches!(read_answer(None), Answer3::Missing));
     }
 
+    fn shown(text: &str) -> Option<String> {
+        jsonx::parse(text)
+            .ok()
+            .and_then(|value| shown_arguments(&value, usize::MAX))
+    }
+
     #[test]
     fn test_shown_arguments_escape_everything_but_ascii() {
-        assert_eq!(shown_arguments(r#"{"a":"x"}"#), r#"{"a":"x"}"#);
+        assert_eq!(shown(r#"{"a":"x"}"#).as_deref(), Some(r#"{"a":"x"}"#));
         assert_eq!(
-            shown_arguments("\"caf\u{e9}\u{202e}\u{1F600}\""),
-            r#""caf\u00e9\u202e\ud83d\ude00""#
+            shown("[\"caf\u{e9}\u{202e}\u{1F600}\"]").as_deref(),
+            Some(r#"["caf\u00e9\u202e\ud83d\ude00"]"#)
         );
-        let shown = shown_arguments("{\"k\u{e9}\":\"v\u{1F600}\"}");
-        assert_eq!(
-            jsonx::parse(&shown).ok(),
-            jsonx::parse("{\"k\u{e9}\":\"v\u{1F600}\"}").ok()
-        );
+        let text = "{\"k\u{e9}\":\"v\u{1F600}\"}";
+        let shown = shown(text).unwrap_or_default();
+        assert_eq!(jsonx::parse(&shown).ok(), jsonx::parse(text).ok());
+    }
+
+    #[test]
+    fn test_shown_arguments_match_the_json_writer() {
+        // The shown form is the JSON writer's compact text, escaped: built
+        // piece by piece, it must come out the same as escaping it whole.
+        for text in [
+            "{}",
+            "[]",
+            "null",
+            r#"{"a":[],"b":{},"c":[[],[{}]],"d":null,"e":true,"f":false}"#,
+            r#"{"n":[1e2,-0,0.50,1E+3,12345678901234567890123]}"#,
+            "{\"q\":\"say \\\"hi\\\" \\\\ /\"}",
+            "{\"c\":\"\\u0000\\u001f\\n\\t\\u007f\\u2028\\u2029\"}",
+            "{\"k\\u00e9y\":[\"\u{1F600}\",\"\u{202e}\",{\"\":1}]}",
+            r#"{"z":1,"a":2,"m":{"y":[1,2,{"x":"w"}]}}"#,
+        ] {
+            let value = jsonx::parse(text).ok();
+            let Some(value) = value else {
+                continue;
+            };
+            let mut written = String::new();
+            jsonx::write_value(&mut written, &value);
+            let mut whole = String::new();
+            push_shown(&mut whole, &written);
+            assert_eq!(
+                shown_arguments(&value, usize::MAX).as_deref(),
+                Some(whole.as_str()),
+                "{text}"
+            );
+            // Exactly at the limit is shown; a byte less is refused.
+            assert_eq!(
+                shown_arguments(&value, whole.len()).as_deref(),
+                Some(whole.as_str())
+            );
+            assert_eq!(shown_arguments(&value, whole.len() - 1), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn test_shown_arguments_stop_at_the_limit() {
+        // A string far over the limit is refused before it is escaped, and
+        // so is a string that only escaping takes over it.
+        let big = jsonx::Value::String("\u{1F600}".repeat(1 << 20).into());
+        assert_eq!(shown_arguments(&big, 4096), None);
+        let escaped = jsonx::Value::String("\u{e9}".repeat(1000).into());
+        // 2,000 bytes of UTF-8, 6,002 shown.
+        assert_eq!(shown_arguments(&escaped, 4096), None);
+        assert!(shown_arguments(&escaped, 6002).is_some());
+        // Many small members add up.
+        let mut members = jsonx::Object::new();
+        for n in 0..1000 {
+            members.push(format!("k{n}"), n);
+        }
+        let many = jsonx::Value::Object(members);
+        assert_eq!(shown_arguments(&many, 4096), None);
     }
 
     #[test]

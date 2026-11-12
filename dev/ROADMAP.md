@@ -45,10 +45,21 @@ Deferred, with reasons:
 - **criterion 0.8**: needs Rust 1.86, above the 1.85 MSRV; the benchmarks use 0.7, the newest that builds on 1.85, until the MSRV moves.
 - **The `extensions` map in capabilities** (audit MCP-ARC-09): no extension is implemented, so none is advertised; capabilities are rendered internally, so adding the map later is not a breaking change.
 
+## v0.3.0 - Confirmation hardening (DONE, 2026-11-12)
+- [x] The confirmation ledger is indexed: issue, redeem, expiry, and eviction cost O(1) amortized whatever the number of entries; a connection's confirmations go when it closes; a server-wide cap (`with_max_total_confirmations`, 4096) refuses new ones past it.
+- [x] A confirm-tier call too large to show is refused without building its shown form past the limit.
+- [x] The policy is consulted on a confirmation's retry (`PermissionRequest::is_retry`), and `Deny` stops it.
+- [x] Tokens and digests use process-wide keys, each seeded on its own thread, in counter mode.
+- [x] Prompt-injection guidance in the `permission` docs and the README.
+
+Deferred, with reasons:
+- **One worker pool per server** instead of per connection, and legacy confirmations that wait without holding a worker: stdio serves one connection per process, so the cost shows only with many connections. Goes with the HTTP transport in v0.5.0.
+- **Tokens and digests from crypt-io's random source and keyed hash**: crypt-io needs Rust 1.87, above this crate's 1.85 MSRV, and would bring aws-lc-rs into a crate that has no third-party dependency. Moves when the MSRV reaches 1.87, at the latest with the HTTP transport, where a `requestState` becomes a bearer capability.
+
 ## v0.5.0 - Implementation
 - [ ] Resources (`resources/list`, `resources/templates/list`, `resources/read`, `resourceSubscriptions` on `subscriptions/listen`) and prompts (`prompts/list`, `prompts/get`, `promptsListChanged`).
 - [ ] Completion (`completion/complete`).
-- [ ] Streamable HTTP transport over the owner's net crates (stateless POST, `MCP-Protocol-Version`, `Mcp-Method`/`Mcp-Name`, `Origin` checks), and the official conformance suite in CI against it (moved from v0.2.0, see above).
+- [ ] Streamable HTTP transport over the owner's net crates (stateless POST, `MCP-Protocol-Version`, `Mcp-Method`/`Mcp-Name`, `Origin` checks), and the official conformance suite in CI against it (moved from v0.2.0, see above). Confirmations are forgotten when the connection that asked closes, so a transport that serves each POST as its own connection keeps them on a longer-lived session, tied to the authenticated principal. One worker pool per server, and crypt-io for tokens (moved from v0.3.0, see above).
 - [ ] `pattern` and `patternProperties` (moved from v0.2.0, see above).
 - [ ] A `tracing` feature.
 - [x] ~~Notifications, progress and cancellation~~ (delivered in v0.2.0).

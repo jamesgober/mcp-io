@@ -9,7 +9,7 @@ mod common;
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -227,15 +227,21 @@ fn test_publish_always_asks_even_when_the_policy_allows() {
 }
 
 #[test]
-fn test_the_policy_decides_a_confirmed_call_once() {
-    // A budget of two confirmed calls allows two, not one: the retry that
-    // carries the confirmation is not charged again.
+fn test_the_policy_sees_the_retry_and_can_skip_counting_it() {
+    // A budget of two confirmed calls allows two, not one: the policy sees
+    // the retry that carries the confirmation, marked as one, and does not
+    // charge it again.
     let runs = Arc::new(AtomicUsize::new(0));
     let decided = Arc::new(AtomicUsize::new(0));
-    let seen = Arc::clone(&decided);
+    let retries = Arc::new(AtomicUsize::new(0));
+    let (seen, seen_retries) = (Arc::clone(&decided), Arc::clone(&retries));
     let left = Mutex::new(2u32);
-    let server = server(&runs).policy(move |_: &PermissionRequest<'_>| {
+    let server = server(&runs).policy(move |request: &PermissionRequest<'_>| {
         let _ = seen.fetch_add(1, Ordering::SeqCst);
+        if request.is_retry() {
+            let _ = seen_retries.fetch_add(1, Ordering::SeqCst);
+            return Decision::Allow;
+        }
         let mut left = left.lock().unwrap();
         match left.checked_sub(1) {
             Some(rest) => {
@@ -253,14 +259,93 @@ fn test_the_policy_decides_a_confirmed_call_once() {
         assert_eq!(text(&reply), "edit ran", "round {round}");
     }
     assert_eq!(runs.load(Ordering::SeqCst), 2);
-    assert_eq!(decided.load(Ordering::SeqCst), 2, "once per confirmed call");
+    assert_eq!(decided.load(Ordering::SeqCst), 4, "the call and its retry");
+    assert_eq!(retries.load(Ordering::SeqCst), 2);
     let reply = client.request(&call_with(5, "edit", FORM, ""));
     assert_eq!(text(&reply), "Permission denied: the budget is spent");
-    // A retry is not a way around the policy: a state it never issued is
-    // refused, even for a tool the policy would allow outright.
+    // A retry is not a way around the policy: `Allow` on a retry still
+    // needs a state the server issued, even for a tool the policy would
+    // allow outright.
     let reply = client.request(&call_with(6, "read", FORM, &accept("forged")));
     assert_eq!(code(&reply), Some(-32602));
     assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn test_a_retry_the_policy_now_denies_does_not_run() {
+    // The policy asks for a confirmation, then is switched to deny before
+    // the client retries with the user's acceptance.
+    let runs = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicBool::new(false));
+    let switch = Arc::clone(&closed);
+    let server = server(&runs).policy(move |_: &PermissionRequest<'_>| {
+        if switch.load(Ordering::SeqCst) {
+            Decision::deny("destructive tools are switched off")
+        } else {
+            Decision::Confirm
+        }
+    });
+    let mut client = Client::new(&server);
+    let reply = client.request(&call_with(1, "delete", FORM, ""));
+    let state = reply["result"]["requestState"].as_str().unwrap().to_owned();
+    closed.store(true, Ordering::SeqCst);
+    let reply = client.request(&call_with(2, "delete", FORM, &accept(&state)));
+    assert_eq!(reply["result"]["isError"], true);
+    assert_eq!(
+        text(&reply),
+        "Permission denied: destructive tools are switched off"
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_a_closed_connections_confirmations_are_forgotten() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let server = server(&runs);
+    let mut asking = Client::new(&server);
+    let mut other = Client::new(&server);
+    let state = |client: &mut Client, id| {
+        let reply = client.request(&call_with(id, "publish", FORM, ""));
+        reply["result"]["requestState"].as_str().unwrap().to_owned()
+    };
+    let (first, second) = (state(&mut asking, 1), state(&mut asking, 2));
+    // While the connection that asked is open, a retry may come on another.
+    let reply = other.request(&call_with(3, "publish", FORM, &accept(&first)));
+    assert_eq!(text(&reply), "publish ran");
+    drop(asking);
+    let reply = other.request(&call_with(4, "publish", FORM, &accept(&second)));
+    assert_eq!(code(&reply), Some(-32602), "forgotten with its connection");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn test_the_server_wide_confirmation_cap_refuses_new_ones() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let server = server(&runs)
+        .with_max_pending_confirmations(2)
+        .with_max_total_confirmations(3);
+    let mut a = Client::new(&server);
+    let mut b = Client::new(&server);
+    let mut c = Client::new(&server);
+    let asked = |client: &mut Client, id| {
+        let reply = client.request(&call_with(id, "publish", FORM, ""));
+        reply["result"]["resultType"] == "input_required"
+    };
+    assert!(asked(&mut a, 1) && asked(&mut a, 2) && asked(&mut b, 3));
+    let reply = c.request(&call_with(4, "publish", FORM, ""));
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(
+        text(&reply).contains("too many confirmations"),
+        "{}",
+        text(&reply)
+    );
+    assert!(reply["result"].get("requestState").is_none());
+    // A connection at its own quota replaces its oldest instead.
+    assert!(asked(&mut a, 5));
+    // Closing a connection makes room.
+    drop(b);
+    assert!(asked(&mut c, 6));
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
 }
 
 #[test]

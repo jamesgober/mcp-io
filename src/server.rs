@@ -284,9 +284,16 @@ pub struct Server {
     policy: Arc<dyn Policy>,
     audit: Option<AuditHook>,
     ledger_capacity: usize,
+    ledger_total: usize,
     ledger: Arc<Ledger>,
     settings: Settings,
 }
+
+/// Outstanding confirmations per connection, by default.
+const PENDING_PER_CONNECTION: usize = 64;
+
+/// Outstanding confirmations in all, by default: 64 connections' worth.
+const PENDING_IN_ALL: usize = 4096;
 
 /// Connection numbers, for the registry's watchers.
 static CONNECTIONS: AtomicU64 = AtomicU64::new(0);
@@ -309,8 +316,13 @@ impl Server {
             registry: Arc::new(Registry::new()),
             policy: Arc::new(Ceiling::default()),
             audit: None,
-            ledger_capacity: 64,
-            ledger: Arc::new(Ledger::new(64, Settings::new().confirmation_timeout)),
+            ledger_capacity: PENDING_PER_CONNECTION,
+            ledger_total: PENDING_IN_ALL,
+            ledger: Arc::new(Ledger::new(
+                PENDING_PER_CONNECTION,
+                PENDING_IN_ALL,
+                Settings::new().confirmation_timeout,
+            )),
             settings: Settings::new(),
         }
     }
@@ -573,7 +585,7 @@ impl Server {
     #[must_use]
     pub fn with_confirmation_timeout(mut self, timeout: Duration) -> Self {
         self.settings.confirmation_timeout = timeout;
-        self.ledger = Arc::new(Ledger::new(self.ledger_capacity, timeout));
+        self.renew_ledger();
         self
     }
 
@@ -591,16 +603,46 @@ impl Server {
 
     /// Outstanding confirmations each connection may have (default 64);
     /// past it, that connection's oldest is forgotten. Confirmations are
-    /// kept server-wide (a retry may arrive on another connection), each as
-    /// a digest of its arguments.
+    /// kept server-wide (a retry may arrive on another open connection),
+    /// each as a digest of its arguments, and a connection's are forgotten
+    /// when it closes.
     #[must_use]
     pub fn with_max_pending_confirmations(mut self, count: usize) -> Self {
         self.ledger_capacity = count.max(1);
+        self.renew_ledger();
+        self
+    }
+
+    /// Outstanding confirmations the whole server may have, across all its
+    /// connections (default 4096). Past it, a call that needs a
+    /// confirmation is answered with a tool error and does not run, until
+    /// confirmations are used, expire, or their connections close. A
+    /// connection at its own quota
+    /// ([`with_max_pending_confirmations`](Self::with_max_pending_confirmations))
+    /// replaces its oldest instead, so it is never refused by this limit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let server = mcp_io::Server::new(mcp_io::Implementation::new("demo", "0.1.0"))
+    ///     .with_max_pending_confirmations(16)
+    ///     .with_max_total_confirmations(1024);
+    /// # let _ = server;
+    /// ```
+    #[must_use]
+    pub fn with_max_total_confirmations(mut self, count: usize) -> Self {
+        self.ledger_total = count.max(1);
+        self.renew_ledger();
+        self
+    }
+
+    /// A fresh ledger with the current confirmation settings.
+    fn renew_ledger(&mut self) {
         self.ledger = Arc::new(Ledger::new(
             self.ledger_capacity,
+            self.ledger_total,
             self.settings.confirmation_timeout,
         ));
-        self
     }
 
     /// Budgets on incoming messages (rpc-io's [`Limits`]; default
