@@ -1,21 +1,20 @@
 # mcp-io &mdash; Engineering Directives
 
 > Engineering standards and the definition of done for this project. Read alongside `REPS.md` (root, authoritative) and `dev/ROADMAP.md` (current phase). If anything here conflicts with `REPS.md`, `REPS.md` wins.
-> LexerSketch plan: `C:/Dev/libraries/Rust/lang-collection/_lexersketch/` (README rules of engagement, ARCHITECTURE, ISSUES, ROADMAP).
 
 ---
 
 ## 0. Philosophy
 
-This library is built and maintained to a production standard and treated as a flagship piece of work. Plan the full path, then build one verified step at a time. "Good enough" is treated as a defect. It is an `-io` crate in the owner's ai-collection: the Model Context Protocol server framework behind LexerSketch's MCP server and every forged language's own MCP server.
+This library is built and maintained to a production standard and treated as a flagship piece of work. Plan the full path, then build one verified step at a time. "Good enough" is treated as a defect. It is an `-io` crate in the owner's ai-collection: the Model Context Protocol server framework behind the toolchain's MCP server and every forged language's own MCP server.
 
 ---
 
 ## 1. What this is
 
-mcp-io owns MCP's protocol layer for servers: per-request versioning (MCP 2026-07-28, stateless) and the legacy `initialize` lifecycle (2025-11-25 and 2025-06-18) on the same connection, discovery and capabilities, the tool registry (resource and prompt registries later), JSON Schema validation of tool input and output, and the permission gate. Tool behaviour belongs to the application (LexerSketch's ls-mcp, or a forged language's MCP server). JSON-RPC itself (framing, correlation, cancellation, budgets, output queues) belongs to rpc-io.
+mcp-io owns MCP's protocol layer for servers: per-request versioning (MCP 2026-07-28, stateless) and the legacy `initialize` lifecycle (2025-11-25 and 2025-06-18) on the same connection, discovery and capabilities, the tool registry (resource and prompt registries later), JSON Schema validation of tool input and output, and the permission gate. Tool behaviour belongs to the application (the toolchain's ls-mcp, or a forged language's MCP server). JSON-RPC itself (framing, correlation, cancellation, budgets, output queues) belongs to rpc-io.
 
-ARCHITECTURE section 14: LexerSketch exposes its engine to AI clients, and every language it forges ships an MCP server; one framework serves both.
+ARCHITECTURE section 14: the toolchain exposes its engine to AI clients, and every language it forges ships an MCP server; one framework serves both.
 
 ---
 
@@ -42,7 +41,7 @@ ARCHITECTURE section 14: LexerSketch exposes its engine to AI clients, and every
 6. Property tests cover every section-4 invariant; a fuzz target exists for every decoder or parser.
 7. Hot-path changes carry benchmarks; no regression over 5%.
 8. `README.md`, `docs/API.md`, and `CHANGELOG.md` updated; the matching `docs/release/vX.Y.Z.md` written before the tag.
-9. v1.0.0 only after a real consumer has exercised the API end to end (LexerSketch decision D18).
+9. v1.0.0 only after a real consumer has exercised the API end to end (decision D18).
 
 ---
 
