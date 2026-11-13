@@ -1,7 +1,6 @@
 # mcp-io - Roadmap
 
 > Path from scaffold to a stable 1.0. Hard parts are front-loaded; each phase has hard exit criteria.
-> Master plan: C:/Dev/libraries/Rust/lang-collection/_lexersketch/ROADMAP.md and NEW-LIBS.md
 >
 > **Anti-deferral rule:** no listed hard task moves to a later phase unless this file records the move and the reason.
 
@@ -69,4 +68,4 @@ Deferred, with reasons:
 - [x] ~~Conformance against the MCP specification; fuzzing~~ (wire conformance and fuzzing delivered in v0.2.0; the official suite moves with HTTP, see v0.5.0).
 
 ## v1.0.0 - Stable
-- [ ] Frozen after LexerSketch's ls-mcp ships on it (D18).
+- [ ] Frozen after the toolchain's ls-mcp ships on it (D18).

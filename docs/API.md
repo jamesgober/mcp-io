@@ -2,7 +2,7 @@
 
 > Complete reference for every public item in `mcp-io`; each section has an example.
 > **Status: pre-1.0 (0.3.0).** The surface is refined across the 0.x series and
-> frozen at `1.0.0`, after LexerSketch's `ls-mcp` has run on it (decision D18).
+> frozen at `1.0.0`, after the toolchain's `ls-mcp` has run on it (decision D18).
 > See [`../dev/ROADMAP.md`](../dev/ROADMAP.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
